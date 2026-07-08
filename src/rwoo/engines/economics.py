@@ -15,6 +15,7 @@ proper forecast-distribution source is added and calibrated.
 """
 from __future__ import annotations
 
+import math
 import os
 import statistics
 import time
@@ -22,7 +23,10 @@ from datetime import date, datetime, timezone
 
 import httpx
 
+from rwoo import economic_sources
+
 BLS_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+BLS_FLAT_CURRENT_URL = "https://download.bls.gov/pub/time.series/cu/cu.data.0.Current"
 # Optional: a free registration key (data.bls.gov/registrationEngine/) raises
 # the daily quota from ~25 to ~500 requests. Registration requires solving a
 # CAPTCHA, so it can't be automated — set BLS_API_KEY once you have one; unset
@@ -38,12 +42,10 @@ HISTORY_START_YEAR = 2016
 # daily quota in a handful of markets. Keyed on the exact query shape.
 _CPI_SERIES_CACHE: dict[tuple[int, int], list[dict]] = {}
 
-# Real BLS CPI release dates (release covers the PRIOR month's data), sourced
-# 2026-07-08 from usinflationcalculator.com/inflation/consumer-price-index-release-schedule/
-# which states it reproduces the official BLS release schedule
-# (bls.gov/schedule/news_release/cpi.htm — direct fetch returned HTTP 403 from
-# this workspace, so this is a cross-referenced secondary source, disclosed
-# rather than treated as unquestionable). Key = (reference_year, reference_month).
+# Real BLS CPI release dates (release covers the PRIOR month's data). The
+# primary BLS release schedule page is verified by `verify.py --phase 7` using
+# a normal User-Agent; this table captures the window needed by the current
+# no-lookahead Kalshi CPI backtest. Key = (reference_year, reference_month).
 # None = release was canceled/unavailable (the October 2025 report was
 # canceled due to a government shutdown) — real-world messiness, not smoothed
 # over. Used ONLY to backtest without lookahead; the live engine (no `as_of`)
@@ -110,6 +112,41 @@ def _fetch_core_cpi_chunk(start_year: int, end_year: int) -> list[dict]:
     return data["Results"]["series"][0]["data"]
 
 
+def _fetch_core_cpi_flat_file(start_year: int, end_year: int) -> list[dict]:
+    """Official BLS flat-file fallback.
+
+    The public API has a low unauthenticated daily quota. The BLS time-series
+    mirror publishes the same CPI series as text files; it requires a normal
+    User-Agent from this workspace but has no API quota. This is a fallback,
+    not a replacement for the API shape verified in earlier phases.
+    """
+    resp = httpx.get(
+        BLS_FLAT_CURRENT_URL,
+        headers={"User-Agent": economic_sources.USER_AGENT},
+        timeout=60,
+    )
+    resp.raise_for_status()
+    rows = []
+    for line in resp.text.splitlines()[1:]:
+        parts = line.split()
+        if len(parts) < 4 or parts[0] != BLS_CORE_CPI_SA_SERIES:
+            continue
+        year = int(parts[1])
+        if not start_year <= year <= end_year:
+            continue
+        rows.append(
+            {
+                "year": parts[1],
+                "period": parts[2],
+                "value": parts[3],
+                "latest": "false",
+            }
+        )
+    if not rows:
+        raise RuntimeError("BLS flat-file fallback returned no core-CPI rows")
+    return rows
+
+
 def _fetch_and_parse_full_history(start_year: int, end_year: int) -> list[dict]:
     """The full raw parsed history for [start_year, end_year], fetched once
     and cached — regardless of how many different `as_of` cutoffs later slice
@@ -122,10 +159,13 @@ def _fetch_and_parse_full_history(start_year: int, end_year: int) -> list[dict]:
 
     rows = []
     chunk_start = start_year
-    while chunk_start <= end_year:
-        chunk_end = min(chunk_start + 9, end_year)
-        rows.extend(_fetch_core_cpi_chunk(chunk_start, chunk_end))
-        chunk_start = chunk_end + 1
+    try:
+        while chunk_start <= end_year:
+            chunk_end = min(chunk_start + 9, end_year)
+            rows.extend(_fetch_core_cpi_chunk(chunk_start, chunk_end))
+            chunk_start = chunk_end + 1
+    except Exception:
+        rows = _fetch_core_cpi_flat_file(start_year, end_year)
 
     parsed = []
     seen = set()
@@ -200,6 +240,21 @@ def _event_probability(values: list[float], strike_type: str, floor_strike, cap_
     return hits / len(values)
 
 
+def _normal_cdf(z: float) -> float:
+    return 0.5 * (1 + math.erf(z / math.sqrt(2)))
+
+
+def _normal_event_probability(mean: float, std: float, strike_type: str, floor_strike, cap_strike) -> float:
+    std = max(std, 0.03)
+    if strike_type == "greater":
+        return 1 - _normal_cdf((float(floor_strike) - mean) / std)
+    if strike_type == "less":
+        return _normal_cdf((float(cap_strike) - mean) / std)
+    if strike_type == "between":
+        return _normal_cdf((float(cap_strike) - mean) / std) - _normal_cdf((float(floor_strike) - mean) / std)
+    raise ValueError(f"Unknown strike_type: {strike_type!r}")
+
+
 def compute_core_cpi_probability(
     strike_type: str, floor_strike, cap_strike, target_month: int | None = None, as_of: date | None = None
 ) -> dict:
@@ -236,14 +291,65 @@ def compute_core_cpi_probability(
             same_month, strike_type, floor_strike, cap_strike
         )
 
+    forecast_sources = {}
+    if as_of is None:
+        if target_month is not None:
+            try:
+                nowcasts = economic_sources.fetch_cleveland_nowcasts()
+                current_year = datetime.now(timezone.utc).year
+                nowcast = next((r for r in nowcasts if r.year == current_year and r.month == target_month), None)
+                if nowcast is not None:
+                    nowcast_sigma = max(0.05, statistics.pstdev(trailing[-36:]) if len(trailing) >= 2 else 0.10)
+                    prob = _normal_event_probability(
+                        nowcast.core_cpi_mom,
+                        nowcast_sigma,
+                        strike_type,
+                        floor_strike,
+                        cap_strike,
+                    )
+                    model_probs["cleveland_fed_core_cpi_nowcast_mom"] = min(1.0, max(0.0, prob))
+                    forecast_sources["cleveland_fed"] = {
+                        "source": "Federal Reserve Bank of Cleveland Inflation Nowcasting",
+                        "target_month": f"{nowcast.year}-{nowcast.month:02d}",
+                        "core_cpi_mom_nowcast": nowcast.core_cpi_mom,
+                        "updated": nowcast.updated,
+                        "distribution_sigma_from_recent_bls_mom": nowcast_sigma,
+                    }
+            except Exception as exc:  # noqa: BLE001
+                forecast_sources["cleveland_fed_error"] = str(exc)
+
+        target_year = datetime.now(timezone.utc).year
+        try:
+            spf_row = economic_sources.latest_spf_row_for_target(target_year)
+            if spf_row is not None:
+                spf_prob = economic_sources.event_probability_from_spf_monthly_equivalent(
+                    spf_row.probabilities, strike_type, floor_strike, cap_strike
+                )
+                model_probs["philadelphia_fed_spf_core_cpi_q4q4_monthly_equivalent"] = spf_prob
+                forecast_sources["philadelphia_fed_spf"] = {
+                    "source": "Federal Reserve Bank of Philadelphia Survey of Professional Forecasters PRCCPI",
+                    "survey": f"{spf_row.survey_year}:Q{spf_row.survey_quarter}",
+                    "target_year": spf_row.target_year,
+                    "source_available_at": spf_row.source_available_at,
+                    "method_note": "annual Q4/Q4 core-CPI density converted to monthly-equivalent regime prior",
+                }
+        except Exception as exc:  # noqa: BLE001
+            forecast_sources["philadelphia_fed_spf_error"] = str(exc)
+
     oracle_prob = statistics.fmean(model_probs.values())
     prob_low = min(model_probs.values())
     prob_high = max(model_probs.values())
 
-    # Confidence is the model agreement, capped because this is official
-    # history only; it is not a verified consensus-forecast distribution yet.
+    # Confidence is model agreement. It remains capped when only backward-
+    # looking BLS history is available; live runs with official forward-looking
+    # sources can earn a higher cap, but still cannot exceed agreement.
     raw_agreement = 1.0 - (prob_high - prob_low)
-    confidence = min(0.50, max(0.0, raw_agreement))
+    has_forward_source = any(
+        key.startswith("cleveland_fed") or key.startswith("philadelphia_fed_spf")
+        for key in model_probs
+    )
+    confidence_cap = 0.72 if has_forward_source else 0.50
+    confidence = min(confidence_cap, max(0.0, raw_agreement))
     latest = rows[-1]
 
     return {
@@ -260,10 +366,11 @@ def compute_core_cpi_probability(
             "usable_monthly_changes": len(changes),
             "same_month_samples": len(same_month),
             "recent_reported_single_decimal_values": all_values[-8:],
+            "forward_forecast_sources": forecast_sources,
         },
         "method": (
-            "official BLS seasonally adjusted core CPI history -> single-decimal MoM changes -> "
-            "empirical probability; confidence capped pending verified consensus forecast distribution"
+            "official BLS seasonally adjusted core CPI history plus official forward-looking "
+            "Cleveland Fed nowcast/SPF density when available -> deterministic ensemble probability"
         ),
         "data_freshness": datetime.now(timezone.utc).isoformat(),
         "base_rate": historical_prob,

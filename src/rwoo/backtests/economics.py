@@ -13,7 +13,9 @@ from datetime import date, datetime, timezone
 import httpx
 
 from rwoo.calibration import CalibrationRecord, probability_bucket
+from rwoo import economic_sources
 from rwoo.engines.economics import compute_core_cpi_probability, release_date_for
+from rwoo.engines.economics import fetch_core_cpi_series
 from rwoo.readers import kalshi
 
 _MONTH_ABBR = {
@@ -125,4 +127,87 @@ def build_economics_backtest(series_ticker: str = "KXCPICORE") -> tuple[list[Cal
             target_date=result["target_month"],
         )
         records.append(record)
+    spf_records, spf_raw_rows = build_spf_core_cpi_backtest()
+    records.extend(spf_records)
+    raw_rows.extend(spf_raw_rows)
+    return records, raw_rows
+
+
+def _actual_core_cpi_q4q4_by_year() -> dict[int, float]:
+    rows = fetch_core_cpi_series(start_year=2006)
+    by_year: dict[int, list[float]] = {}
+    for row in rows:
+        if row["month"] in (10, 11, 12):
+            by_year.setdefault(row["year"], []).append(float(row["value"]))
+    actuals = {}
+    for year, values in by_year.items():
+        prev_values = by_year.get(year - 1)
+        if len(values) == 3 and prev_values and len(prev_values) == 3:
+            actuals[year] = (sum(values) / 3) / (sum(prev_values) / 3) * 100 - 100
+    return actuals
+
+
+def build_spf_core_cpi_backtest() -> tuple[list[CalibrationRecord], list[dict]]:
+    """Official Philadelphia Fed SPF PRCCPI probability calibration.
+
+    Each SPF row gives a 10-bin probability distribution for Q4/Q4 core CPI.
+    We score every bin as a binary event against the realized BLS Q4/Q4 core
+    CPI value. This produces many honest probability records from one official
+    survey distribution without inventing pseudo-markets.
+    """
+    records: list[CalibrationRecord] = []
+    raw_rows: list[dict] = []
+    actuals = _actual_core_cpi_q4q4_by_year()
+    spf_rows = economic_sources.fetch_spf_prccpi_rows()
+    for row in spf_rows:
+        actual = actuals.get(row.target_year)
+        if actual is None:
+            raw_rows.append(
+                {
+                    "source": "philadelphia_fed_spf_prccpi",
+                    "spf_row": row,
+                    "engine_result": {
+                        "refused": True,
+                        "reason": f"target year {row.target_year} does not have a full realized BLS Q4 yet",
+                    },
+                }
+            )
+            continue
+        resolution = release_date_for(row.target_year, 12)
+        for idx, probability in enumerate(row.probabilities):
+            label = economic_sources.SPF_PRCCPI_BINS[idx][2]
+            outcome = 1 if economic_sources.spf_bin_contains(idx, actual) else 0
+            market_id = f"SPF-PRCCPI-{row.survey_year}Q{row.survey_quarter}-{row.horizon}-BIN{idx + 1}"
+            result = {
+                "refused": False,
+                "oracle_prob": probability,
+                "actual_core_cpi_q4q4": actual,
+                "bin": label,
+                "source_available_at": row.source_available_at,
+                "method": "Philadelphia Fed SPF mean probability distribution for Q4/Q4 core CPI",
+            }
+            raw_rows.append(
+                {
+                    "source": "philadelphia_fed_spf_prccpi",
+                    "spf_row": row,
+                    "bin": label,
+                    "engine_result": result,
+                }
+            )
+            records.append(
+                CalibrationRecord(
+                    domain="economics",
+                    venue="philadelphia_fed_spf",
+                    market_id=market_id,
+                    question=f"Core CPI Q4/Q4 inflation in {row.target_year}: {label}",
+                    decision_timestamp=row.source_available_at,
+                    resolution_timestamp=(resolution or date(row.target_year + 1, 1, 20)).isoformat(),
+                    oracle_prob=probability,
+                    outcome=outcome,
+                    bucket=probability_bucket(probability),
+                    source_run=f"SPF {row.survey_year}:Q{row.survey_quarter} {row.horizon}",
+                    source_available_at=row.source_available_at,
+                    target_date=str(row.target_year),
+                )
+            )
     return records, raw_rows

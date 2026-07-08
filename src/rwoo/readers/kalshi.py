@@ -50,6 +50,31 @@ def fetch_event(event_ticker: str, client: httpx.Client | None = None) -> dict:
             client.close()
 
 
+def fetch_markets(series_ticker: str, limit: int = 100, client: httpx.Client | None = None) -> list[dict]:
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        resp = client.get(
+            f"{BASE_URL}/markets",
+            params={"limit": limit, "series_ticker": series_ticker},
+        )
+        resp.raise_for_status()
+        return resp.json().get("markets", [])
+    finally:
+        if own_client:
+            client.close()
+
+
+def _series_category(series_ticker: str) -> str | None:
+    if series_ticker.startswith(("KXHIGH", "KXLOW")):
+        return "Climate and Weather"
+    if series_ticker.startswith(("KXCPI", "KXFED", "KXGDP", "KXU3", "KXPAYROLLS")):
+        return "Economics"
+    if series_ticker.startswith(("KXMENWORLDCUP", "KXNBA", "KXNFL", "KXMLB", "KXNHL")):
+        return "Sports"
+    return None
+
+
 def to_canonical(event: dict, market: dict) -> CanonicalMarket:
     ev = event["event"]
     settlement_sources = ev.get("settlement_sources") or []
@@ -79,7 +104,39 @@ def to_canonical(event: dict, market: dict) -> CanonicalMarket:
     )
 
 
+def market_row_to_canonical(market: dict) -> CanonicalMarket:
+    series_ticker = market.get("series_ticker") or market.get("event_ticker", "").split("-", 1)[0]
+    category = _series_category(series_ticker)
+    yes_bid = float(market.get("yes_bid_dollars", 0) or 0)
+    yes_ask = float(market.get("yes_ask_dollars", 0) or 0)
+    implied_prob = (yes_bid + yes_ask) / 2
+    spread = yes_ask - yes_bid
+    title = market.get("title", "")
+
+    return CanonicalMarket(
+        venue="kalshi",
+        market_id=market["ticker"],
+        question=title,
+        domain=classify_kalshi(category, title),
+        resolution_rule=market.get("rules_primary", ""),
+        resolution_source=market.get("settlement_source") or "see resolution rule text",
+        resolution_time=market.get("expiration_time") or market.get("latest_expiration_time"),
+        implied_prob=implied_prob,
+        spread=spread,
+        fetched_at=_now_iso(),
+        raw={"market": market, "series_ticker": series_ticker},
+    )
+
+
 def fetch_markets_for_event(event_ticker: str, client: httpx.Client | None = None) -> list[CanonicalMarket]:
     data = fetch_event(event_ticker, client=client)
     event = {"event": data["event"]}
     return [to_canonical(event, m) for m in data.get("markets", [])]
+
+
+def fetch_canonical_markets_for_series(
+    series_ticker: str,
+    limit: int = 100,
+    client: httpx.Client | None = None,
+) -> list[CanonicalMarket]:
+    return [market_row_to_canonical(m) for m in fetch_markets(series_ticker, limit=limit, client=client)]

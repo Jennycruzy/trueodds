@@ -33,13 +33,13 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 6 complete**
-(foundations, market readers, the weather engine, edge computation with its
-reproducibility proof, the restraint layer, economics/sports engines, a
-no-lookahead calibration backtest for weather and sports, an economics
-backtest path that is currently blocked by BLS's real daily quota in this
-workspace, and tamper-evident receipts with a real, corrected X Layer mainnet
-anchor).
+project depends on, and how it was verified). Currently: **live opportunity
+scanner complete** on top of Phase 6/7 hardening (foundations, market readers,
+the weather engine, edge computation with its reproducibility proof, the
+restraint layer, economics/sports engines, no-lookahead calibration,
+tamper-evident receipts with a real corrected X Layer mainnet anchor,
+receipt-backed daily proof loop, and a ranked cost-aware scan across live
+markets).
 
 The calibration backtest code keeps full/no-cap paths, but the human-readable
 gate uses explicit runtime controls where live APIs are slow or quota-limited:
@@ -50,14 +50,22 @@ gate uses explicit runtime controls where live APIs are slow or quota-limited:
   gate does not look frozen. Set `RWOO_WEATHER_GATE_RECORDS_PER_SERIES=0` for
   the full no-cap run.
 - **Economics** scores every real settled core-CPI market using the actual
-  BLS release-date schedule (not calendar month) for a genuine no-lookahead
-  cutoff when BLS data is available. Today's workspace hit BLS's real
-  unauthenticated daily quota, so the gate discloses economics as incomplete
-  rather than fabricating a Brier score.
+  BLS release-date schedule (not calendar month), adds official Philadelphia
+  Fed SPF probability distributions for historical calibration, and uses the
+  official BLS flat-file mirror as a quota-free fallback when the BLS API is
+  unavailable. The live economics engine now also consumes official
+  forward-looking Cleveland Fed nowcasts plus SPF density data.
 - **Sports** scores every real per-team market from two real, resolved
   tournaments (Euro 2024, Copa América 2024) using a self-computed Elo rating
   history replayed from 49,506 real historical matches, because no public API
-  provides national-team ratings by arbitrary past date.
+  provides national-team ratings by arbitrary past date. The live sports
+  engine now blends World Football Elo with the official FIFA/Coca-Cola Men's
+  World Ranking and includes deterministic 48-team tournament simulators for
+  both source families.
+- **Opportunity scanning** pulls batches from live Kalshi and Polymarket
+  markets, runs the supported deterministic engines, applies uncertainty and
+  real trading-friction checks, ranks actionable candidates, and emits
+  JSON/Markdown artifacts under `data/public/`.
 
 ## Reproduce every claim
 
@@ -71,8 +79,11 @@ python3 verify.py --phase 1   # market readers: canonical objects from live mark
 python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
 python3 verify.py --phase 3   # edge computation + a live reproducibility proof
 python3 verify.py --phase 4   # restraint layer + live BLS economics and Elo sports baselines
-python3 verify.py --phase 5   # calibration backtest: weather/sports scored; economics quota disclosed
+python3 verify.py --phase 5   # calibration backtest: weather/economics/sports scored
 python3 verify.py --phase 6   # receipts, tamper test, real X Layer mainnet anchor
+python3 verify.py --phase 7   # pre-listing hardening: economics/sports/primary-source/daily-loop gate
+python3 verify.py --phase 8   # live opportunity scanner: broad, cost-aware batch scan
+PYTHONPATH=src python3 -m rwoo.scanner --write --top 20
 ```
 
 Both make live network calls and print the real responses plus a
@@ -92,12 +103,12 @@ or a canned pass.
   - `engines/weather.py` — Stage 2 weather engine: multi-model ensemble
     consensus + confidence, plus a NASA POWER historical base rate. No LLM
     anywhere in this path — verified by an AST import check in the harness.
-  - `engines/economics.py` — Phase 4 conservative official-history baseline
-    for core-CPI markets using live BLS data; confidence capped until a
-    verified consensus-forecast distribution is added.
-  - `engines/sports.py` — Phase 4 conservative World Cup baseline using live
-    World Football Elo ratings; confidence capped until a fuller simulator and
-    independent sources are added.
+  - `economic_sources.py` — official Cleveland Fed nowcast and Philadelphia
+    Fed SPF probability-distribution readers.
+  - `engines/economics.py` — official-history baseline plus official
+    forward-looking Cleveland Fed/SPF inputs for core-CPI markets.
+  - `engines/sports.py` — World Football Elo + official FIFA ranking baselines
+    plus deterministic 48-team tournament simulators.
   - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against
     the oracle's own uncertainty band, source freshness, source/model agreement,
     and real trading friction (Kalshi's published fee formula + the live
@@ -116,10 +127,14 @@ or a canned pass.
     Polymarket tournament markets against as-of-date self-computed ratings.
   - `receipts.py` — canonical JSON, real keccak256 commitments, and an
     append-only hash-chained ledger with a tamper test.
+  - `daily.py` — receipt-backed daily proof loop and public JSON/Markdown
+    artifact generation.
+  - `scanner.py` — live opportunity scanner that ranks cost-adjusted
+    actionable candidates and writes `data/public/opportunity_scan_latest.*`.
   - `xlayer.py` — X Layer RPC verification and on-chain anchor verification
     (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
     actually succeeded — an outer bundler-transaction receipt status alone is
     not sufficient proof, learned the hard way; see Ledger §16.1).
-  - (OKX listing, daily proof loop, public pages — later phases)
+  - (OKX listing, funded trade/payment execution, public pages — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

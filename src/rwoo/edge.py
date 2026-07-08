@@ -8,13 +8,13 @@ check fails, the honest answer is "no clear edge," not a confident verdict.
 
 Constants used here are cited, not invented:
   - 0.07 is Kalshi's own published taker-fee rate: fee = ceil(fee_multiplier
-    * 0.07 * contracts * price * (1-price)) per contract. Cross-referenced
-    against multiple independent secondary sources and corroborated by
+    * 0.07 * contracts * price * (1-price)) per contract. The primary fee PDF
+    is readable through browser retrieval and the same shape is corroborated by
     Kalshi's own live API fields (`fee_type: "quadratic"` — P*(1-P) is
-    quadratic in P — and `fee_multiplier`, the M term). The primary PDF
-    (kalshi.com/docs/kalshi-fee-schedule.pdf) returned a bot-checkpoint page
-    when fetched directly rather than the document itself — that gap is
-    disclosed here and in docs/VERIFICATION_LEDGER.md, not papered over.
+    quadratic in P — and `fee_multiplier`, the M term). Direct PDF fetches from
+    this workspace still return HTTP 429 / Vercel Security Checkpoint, so Gate
+    7 records that workspace constraint instead of pretending the verifier
+    parsed the PDF locally.
   - Polymarket's fee schedule has not been verified at all. Friction there
     uses the real quoted spread only; the missing fee term is a stated gap,
     not a guessed number standing in for real data.

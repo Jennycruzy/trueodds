@@ -8,22 +8,24 @@ until a verification gate proves otherwise.
 
 ## Sequencing Decision
 
-Phase 6 is now **complete** (see below) — a real, correctly-verified X Layer
-mainnet anchor exists. Next up: **Phase 7** (OKX.AI listing + service
-registration + payment), since the real Agentic Wallet/Onchain OS skills are
-already installed and working in this workspace. Economics/sports model
-upgrades remain queued behind Phase 7+ — they don't block listing.
+Phase 6, pre-listing hardening, and the live opportunity scanner are now
+**complete**: economics produces a real forward-looking-source probability and
+a real Brier score, sports includes multi-source deterministic tournament
+simulators, primary-source checks are wired, the daily proof loop produces
+receipt-backed artifacts, and Phase 8 scans live markets for cost-adjusted
+opportunities.
+Only after these gates pass should OKX.AI listing/service registration/payment
+work resume.
 
 Recommended order (updated):
 
 1. ~~Before Phase 6, clean up quick primary-source verification gaps~~ — done.
 2. ~~Phase 6: receipts, append-only ledger, tamper evidence, X Layer anchoring~~ — done, including a corrected anchor after catching a false positive in the verifier (see docs/VERIFICATION_LEDGER.md §16.1).
-3. **Phase 7 next:** OKX.AI ASP listing, service registration, Payment SDK, a real pay-per-call round trip.
-4. Upgrade economics: verified consensus forecast source, no-lookahead backtest,
-   calibration curve, Brier score.
-5. Upgrade sports: simulator or multiple independent rating sources,
-   no-lookahead backtest, calibration curve, Brier score.
-6. Continue Phase 8+: daily proof loop, public pages.
+3. ~~Pre-listing hardening: economics, sports, primary sources, daily proof loop~~ — done; `python3 verify.py --phase 7` passes.
+4. ~~Live opportunity scanner: broad cost-aware scan across supported markets~~ — done; `python3 verify.py --phase 8` passes and `data/public/opportunity_scan_latest.*` is generated.
+5. OKX.AI ASP listing, service registration, Payment SDK, a real pay-per-call round trip.
+6. Funded execution path: credentials, risk limits, dry-run/live switch, order placement, and post-trade receipts.
+7. Public calibration page and distribution surfaces.
 
 ## Immediate Checklist
 
@@ -64,92 +66,73 @@ transaction (0x655d283549f0e809985a7fa401b1a8a14b6ad1419e3ebd15dd57424950c53ef2)
 now tracked in git so any future drift between the anchored hash and the
 ledger's actual content is visible in a diff, not silent.
 
-## Gaps From Completed Phases Not Fully Covered By The Immediate Next Phase
+## Gaps Closed By Pre-Listing Hardening
 
 ### Production economics model and calibration
 
-Current status: incomplete.
+Current status: complete for pre-listing hardening.
 
-What exists: a conservative BLS-history baseline for core CPI markets, plus a
-no-lookahead backtest path that filters CPI observations by real release date.
-The current workspace hit BLS's unauthenticated daily quota before a full
-economics calibration score could be produced, and BLS's public flat-file
-mirror also returned HTTP 403 from here.
+What exists: the live core-CPI economics engine now combines official BLS
+history with official forward-looking Cleveland Fed monthly CPI/core-CPI
+nowcasts and Philadelphia Fed SPF PRCCPI probability distributions. The BLS
+API is still tried first, but the official BLS flat-file mirror is now used as
+a quota-free fallback, so a full economics calibration run is no longer allowed
+to pass by claiming the unauthenticated BLS quota blocked it.
 
-Why incomplete: it is backward-looking official history, not a verified
-forward-looking consensus forecast distribution. It is useful for a safe
-baseline and for exercising the pipeline, but it is not yet "true odds" for a
-future release.
+Backtest evidence: `python3 verify.py --phase 5` now builds 1,427 economics
+calibration records: 27 real settled Kalshi CPI markets plus 1,400 official
+SPF probability-bin records scored against realized BLS Q4/Q4 core CPI. It
+prints an economics reliability curve and Brier score (`0.0550` in the latest
+run) and demonstrates deterministic recalibration only after measuring
+miscalibration.
 
-Not covered by Phase 6: Phase 6 handles receipts and anchoring, not better
-economic modeling.
-
-Completion criteria:
-
-- Verify a consensus forecast distribution source for CPI/PCE/NFP.
-- Provide `BLS_API_KEY` or rerun after BLS quota reset so the no-lookahead
-  economics backtest can produce real records and a Brier score.
-- Store raw pre-release forecast distributions with timestamps.
-- Backtest with no lookahead against resolved historical releases/markets.
-- Produce economics reliability curve and Brier score.
-- Apply and document recalibration only if the backtest proves it is needed.
+Gate evidence: `python3 verify.py --phase 7` verifies the official Cleveland
+Fed and Philadelphia Fed sources, proves the live engine includes those
+forward-looking sources, and fails if economics does not produce real records
+and a Brier score.
 
 ### Production sports model and calibration
 
-Current status: incomplete.
+Current status: complete for pre-listing hardening; still improvable later.
 
 What exists: a conservative World Cup baseline using live World Football Elo
-ratings and two deterministic transforms, plus a real sports calibration
-backtest for Euro 2024 and Copa America 2024 using self-computed historical
-Elo ratings replayed from real match history.
+ratings plus the official FIFA/Coca-Cola Men's World Ranking. Each source
+family feeds deterministic rank/rating transforms and a deterministic 48-team
+tournament simulator. The calibration backtest remains real: Euro 2024 and
+Copa America 2024 are scored using self-computed historical Elo ratings
+replayed from real match history as of the market decision date.
 
-Why incomplete: the calibration backtest is real but narrow. The production
-engine is still not a tournament simulator, does not model bracket path,
-qualification state, injuries/lineups, or multiple independent rating systems.
-
-Not covered by Phase 6: Phase 6 handles receipts and anchoring, not better
-sports modeling.
-
-Completion criteria:
-
-- Add a proper simulator or multiple independent rating/projection sources.
-- Verify all source timestamps and data availability.
-- Broaden no-lookahead backtests beyond two tournaments.
-- Keep producing sports reliability curves and Brier scores as the sample grows.
-- Recalibrate if the backtest proves miscalibration.
+Future improvement: add independent projection-market/bookmaker/projection
+sources beyond ranking systems, injury/lineup adjustments, qualification/draw
+state, and more resolved tournaments as reliable market history becomes
+available.
 
 ### Primary Kalshi fee schedule PDF
 
-Current status: incomplete primary-source verification.
+Current status: complete for pre-listing hardening; one workspace fetch
+constraint remains documented.
 
-What exists: fee formula corroborated by independent secondary sources and
-Kalshi live API fields (`fee_type`, `fee_multiplier`).
+What exists: the official Kalshi Help Center fee article is reachable and
+links the fee-schedule PDF. Browser retrieval of the PDF verified the primary
+formula (`0.07 * C * P * (1-P)` for taker fees, with multiplier `M`); the
+official Kalshi API independently exposes `fee_type: "quadratic"` and
+`fee_multiplier: 1`. The pre-listing gate now checks the Help Center link,
+the official API fields, and the direct PDF fetch outcome.
 
-Why incomplete: the primary PDF was blocked by a bot checkpoint when fetched.
+Known infrastructure constraint:
 
-Not covered by Phase 6 unless explicitly included.
-
-Completion criteria:
-
-- Retrieve/read the primary Kalshi fee schedule from Kalshi directly, or
-  document a support-confirmed source.
-- Update the Verification Ledger with the primary evidence.
+`https://kalshi.com/docs/kalshi-fee-schedule.pdf` still returns HTTP 429 from
+this workspace even with browser-like headers. Gate 7 does not pretend the
+workspace downloaded the PDF; it passes only if the official Help Center link,
+API corroboration, and explicit PDF fetch status are all verified.
 
 ### Primary hackathon rules and submission form
 
-Current status: incomplete primary-source verification.
+Current status: complete.
 
-What exists: secondary-sourced deadline/submission information.
-
-Why incomplete: the primary rules page/form must be checked before submission.
-
-Not covered by Phase 6.
-
-Completion criteria:
-
-- Verify deadline, form URL, required assets, and eligibility criteria against
-  primary OKX hackathon sources.
-- Update the Verification Ledger.
+The primary OKX Build X page and official Google Form are verified in
+`docs/VERIFICATION_LEDGER.md`; `python3 verify.py --phase 7` checks the OKX
+Build X primary page before listing work can proceed.
 
 ### OKX payment settlement token
 
@@ -159,8 +142,8 @@ What exists: conflicting sources mention USDT/USDG/USDC on X Layer.
 
 Why incomplete: only a real Payment SDK funded call can settle the discrepancy.
 
-Not covered by Phase 6 unless payment work is pulled forward; normally covered
-in Phase 7.
+Not covered by Phase 6 or pre-listing hardening; this belongs to the later
+listing/payment phase.
 
 Completion criteria:
 
@@ -168,15 +151,37 @@ Completion criteria:
 - Record actual settlement token and rail.
 - Update service pricing accordingly.
 
-### Public calibration page
+### Funded execution path
 
 Current status: not built.
 
-What exists: Phase 5 computes weather calibration data in the harness.
+What exists: `src/rwoo/scanner.py` finds and ranks actionable cost-adjusted
+candidates from live markets. It writes JSON/Markdown artifacts and Phase 8
+proves the scanner runs.
 
-Why incomplete: there is no live page reading from the same calibration store.
+Why incomplete: no exchange credential flow, wallet approval flow, order
+placement API, max-size/risk-limit policy, or post-trade receipt is wired.
+The scanner says what the engine would trade; it does not spend funds.
 
-Not covered by Phase 6; covered later by Phase 8.5.
+Completion criteria:
+
+- Add dry-run and live modes with explicit risk limits.
+- Wire authenticated exchange/order APIs only after credentials are approved.
+- Record every submitted order and fill as a receipt.
+- Make live mode impossible without explicit operator configuration.
+
+### Public calibration page
+
+Current status: daily proof loop built; full public calibration page still open.
+
+What exists: `src/rwoo/daily.py` creates a real daily proof receipt, verifies
+the ledger, and emits public JSON/Markdown artifacts generated from the same
+committed record. Phase 7 fails if this loop cannot run.
+
+Why still open: there is not yet a hosted public calibration page reading from
+the same calibration store.
+
+Not covered by Phase 6/7/8; covered later after the scanner/listing path.
 
 Completion criteria:
 

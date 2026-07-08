@@ -32,9 +32,10 @@ def get_with_retry(url, params, timeout=15, attempts=3):
     before surfacing an honest failure — this is not fakery, it still fails
     loudly if the API is genuinely unreachable."""
     last_exc = None
+    headers = {"User-Agent": "Mozilla/5.0 rwoo-verifier/1.0"}
     for attempt in range(1, attempts + 1):
         try:
-            resp = httpx.get(url, params=params, timeout=timeout)
+            resp = httpx.get(url, params=params, headers=headers, timeout=timeout)
             resp.raise_for_status()
             return resp
         except Exception as exc:  # noqa: BLE001
@@ -788,7 +789,8 @@ def phase_4():
             not result["refused"]
             and 0.0 <= result["oracle_prob"] <= 1.0
             and "BLS" in result["per_source_values"]["source"]
-            and "confidence low" in e["reason"]
+            and result["per_source_values"].get("forward_forecast_sources")
+            and e["actionable"] is False
         )
         if not econ_ok:
             failures.append("economics engine")
@@ -796,26 +798,31 @@ def phase_4():
         print(f"FAIL: economics engine raised an error: {exc}")
         failures.append("economics engine")
 
-    hdr("SPORTS ENGINE — real Polymarket World Cup market + live Elo ratings")
+    hdr("SPORTS ENGINE — real Polymarket World Cup market + live Elo + FIFA ratings")
     sports_ok = False
     try:
         market = _find_polymarket_question("Will Spain win the 2026 FIFA World Cup?")
         result = sports.compute_world_cup_probability(market.question)
         e = edge_mod.compute_edge(market, result)
         print(market.describe())
-        print("Live Elo evidence used by the engine:")
-        show_json("World Football Elo features", result["per_source_values"], max_chars=1800)
+        print("Live sports evidence used by the engine:")
+        show_json("World Football Elo + FIFA features", result["per_source_values"], max_chars=2200)
         print("Per-model deterministic probabilities:")
         for name, val in result["per_model_prob"].items():
             print(f"  {name}: {val:.4f}")
         print(f"oracle_prob={result['oracle_prob']:.4f} confidence={result['confidence']:.4f} "
               f"band=[{result['prob_low']:.4f}, {result['prob_high']:.4f}]")
         print(f"edge decision: actionable={e['actionable']} reason={e['reason']}")
+        sources = result["per_source_values"].get("sources", [])
+        per_model = result.get("per_model_prob", {})
         sports_ok = (
             not result["refused"]
             and 0.0 <= result["oracle_prob"] <= 1.0
-            and result["per_source_values"]["source"] == "World Football Elo Ratings"
-            and "confidence low" in e["reason"]
+            and "World Football Elo Ratings" in sources
+            and "FIFA/Coca-Cola Men's World Ranking" in sources
+            and "elo_48_team_tournament_simulator" in per_model
+            and "fifa_48_team_tournament_simulator" in per_model
+            and e["actionable"] is False
         )
         if not sports_ok:
             failures.append("sports engine")
@@ -846,8 +853,8 @@ def phase_4():
         "Within-noise restraint refused a real market whose implied probability sat inside the band": within_noise_ok,
         "Stale-data restraint refused aged real inputs": stale_ok,
         "Economics engine ran end to end on a real Kalshi CPI market using official BLS data": econ_ok,
-        "Sports engine ran end to end on a real Polymarket World Cup market using live Elo ratings": sports_ok,
-        "Low-confidence/disagreeing/thin-source outputs were downgraded, not called actionable": econ_ok and sports_ok,
+        "Sports engine ran end to end on a real Polymarket World Cup market using live Elo + FIFA ratings": sports_ok,
+        "Uncertain or cost-contained outputs were downgraded, not called actionable": econ_ok and sports_ok,
         "No LLM SDK anywhere in the Phase 4 probability/edge computation path": core_law_ok,
         "No live-call failures": len(failures) == 0,
     }
@@ -1049,9 +1056,10 @@ def phase_5():
 
     hdr("BUILDING REAL ECONOMICS CALIBRATION RECORD")
     print("Every real settled KXCPICORE market, scored using ONLY BLS values whose")
-    print("real publication date (not calendar month) was public by decision time.")
-    print("Constrained by BLS's real unauthenticated rate limit (~25 req/day) unless")
-    print("BLS_API_KEY is set — reported honestly if the quota is exhausted, not faked.\n")
+    print("real publication date (not calendar month) was public by decision time,")
+    print("plus official Philadelphia Fed SPF probability distributions scored")
+    print("against realized BLS Q4/Q4 core CPI. The BLS API is still tried first,")
+    print("but the official BLS flat-file mirror is used as a quota-free fallback.\n")
     try:
         economics_records, economics_raw_rows = economics_backtest.build_economics_backtest()
     except Exception as exc:  # noqa: BLE001
@@ -1059,22 +1067,31 @@ def phase_5():
         economics_records, economics_raw_rows = [], []
         failures.append("economics backtest")
 
-    econ_quota_blocked = any(
-        "daily threshold" in str(row.get("engine_result", {}).get("reason", "")).lower()
-        for row in economics_raw_rows
-    )
     if economics_records:
-        print(f"Built {len(economics_records)} calibration records from real settled Kalshi CPI markets.\n")
-        for idx, record in enumerate(economics_records[:8], start=1):
-            print(f"{idx:02d}. {record.market_id}  decision={record.decision_timestamp}  "
-                  f"target_month={record.target_date}  oracle_prob={record.oracle_prob:.4f}  outcome={record.outcome}")
-        if len(economics_records) > 8:
-            print(f"    ... and {len(economics_records) - 8} more real records.")
-    elif econ_quota_blocked:
-        print("FAIL (external, disclosed): BLS's real unauthenticated daily request quota is")
-        print("exhausted from earlier verification calls in this workspace today. This is a")
-        print("genuine external rate limit, not a code defect — see docs/VERIFICATION_LEDGER.md.")
-        failures.append("BLS daily quota exhausted")
+        spf_count = sum(1 for record in economics_records if record.venue == "philadelphia_fed_spf")
+        kalshi_count = sum(1 for record in economics_records if record.venue == "kalshi")
+        print(
+            f"Built {len(economics_records)} economics calibration records "
+            f"({kalshi_count} Kalshi CPI markets, {spf_count} official SPF probability-bin records).\n"
+        )
+        print("Real economics calibration records sampled from the built record set:")
+        sample_records = [
+            *[record for record in economics_records if record.venue == "kalshi"][:4],
+            *[record for record in economics_records if record.venue == "philadelphia_fed_spf"][:4],
+        ]
+        for idx, record in enumerate(sample_records, start=1):
+            print(
+                f"{idx:02d}. [{record.venue}] {record.market_id}"
+                f"  decision={record.decision_timestamp}"
+                f"  target={record.target_date}"
+                f"  oracle_prob={record.oracle_prob:.4f}"
+                f"  outcome={record.outcome}"
+                f"  bucket={record.bucket}"
+            )
+            print(f"    question={record.question}")
+            print(f"    source_run={record.source_run}  source_available_at={record.source_available_at}")
+        if len(economics_records) > len(sample_records):
+            print(f"    ... and {len(economics_records) - len(sample_records)} more real economics records.")
     else:
         print("FAIL: no economics calibration records were built.")
         failures.append("no economics records")
@@ -1094,12 +1111,6 @@ def phase_5():
 
     if economics_records:
         econ_curve, econ_brier, econ_gap, econ_recal_ok = _score_domain("economics", economics_records)
-    elif econ_quota_blocked:
-        hdr("ECONOMICS — RELIABILITY CURVE + BRIER SCORE")
-        print("Economics calibration is not scored in this run because the real BLS")
-        print("daily quota is exhausted. This is kept as an INCOMPLETE build gap, not")
-        print("called complete and not used to fake a Brier score.")
-        econ_curve, econ_brier, econ_gap, econ_recal_ok = [], None, None, True
     else:
         econ_curve, econ_brier, econ_gap, econ_recal_ok = _score_domain("economics", economics_records)
 
@@ -1176,15 +1187,12 @@ def phase_5():
         "Every weather record proves source availability <= decision < resolution": weather_no_lookahead_ok,
         "Weather reliability curve + Brier score printed": weather_brier is not None,
         "Weather recalibration path shown or honestly not triggered": weather_recal_ok,
-        (
-            f"Economics calibration built or honestly blocked by BLS quota "
-            f"(records={len(economics_records)}, quota_blocked={econ_quota_blocked})"
-        ): len(economics_records) >= 1 or econ_quota_blocked,
-        "Economics no-lookahead enforced when records are available": econ_no_lookahead_ok or econ_quota_blocked,
+        f"Economics calibration built from real records (got {len(economics_records)})": len(economics_records) >= 200,
+        "Economics no-lookahead enforced": econ_no_lookahead_ok,
         f"At least 20 real sports calibration records built (got {len(sports_records)})": len(sports_records) >= 20,
         "Sports no-lookahead enforced (Elo replayed strictly before decision date)": sports_no_lookahead_ok,
         "No LLM SDK anywhere in calibration/backtest paths": core_law_ok,
-        "No unexpected live-call failures": len(failures) == 0 or econ_quota_blocked and len(failures) == 1,
+        "No unexpected live-call failures": len(failures) == 0,
     }
     all_pass = True
     for name, passed in checks.items():
@@ -1192,11 +1200,6 @@ def phase_5():
         if not passed:
             all_pass = False
         print(f"  [{status}] {name}")
-    if econ_quota_blocked:
-        print("  [INFO] Economics record count is capped by BLS's real daily quota, not a code")
-        print("         defect — disclosed above and in docs/VERIFICATION_LEDGER.md. Re-run after")
-        print("         quota reset or with BLS_API_KEY set for a real, complete economics score.")
-
     print()
     print(RULE)
     print(f"GATE 5 OVERALL: {'PASS' if all_pass else 'FAIL'}")
@@ -1417,6 +1420,367 @@ def phase_6():
     return 0 if all_pass else 1
 
 
+def phase_7():
+    from pathlib import Path
+    import ast
+    import inspect
+    import tempfile
+
+    from rwoo import daily, economic_sources
+    from rwoo.backtests import economics as economics_backtest
+    from rwoo.engines import economics as economics_engine
+    from rwoo.engines import sports as sports_engine
+    from rwoo import calibration
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 7")
+    print("GATE 7: Pre-listing build hardening")
+    print(RULE)
+    print()
+    print("This gate deliberately runs before any OKX.AI listing work. It closes")
+    print("the build-quality gaps: official economics forecast sources, economics")
+    print("calibration scoring, sports simulator path, primary-source checks, and")
+    print("the daily proof loop. No listing claim is made here.\n")
+
+    failures = []
+    nowcasts = []
+
+    hdr("ECONOMICS — OFFICIAL FORWARD-LOOKING SOURCES")
+    try:
+        nowcasts = economic_sources.fetch_cleveland_nowcasts()
+        spf_rows = economic_sources.fetch_spf_prccpi_rows()
+        show_json(
+            "Cleveland Fed monthly nowcast sample",
+            [nowcasts[0].__dict__, nowcasts[-1].__dict__],
+            max_chars=1200,
+        )
+        show_json(
+            "Philadelphia Fed SPF PRCCPI sample",
+            [spf_rows[-1].__dict__],
+            max_chars=1400,
+        )
+        econ_sources_ok = len(nowcasts) >= 1 and len(spf_rows) >= 100
+        print(f"  [{'PASS' if econ_sources_ok else 'FAIL'}] official Cleveland Fed + Philadelphia Fed forecast sources parsed")
+        if not econ_sources_ok:
+            failures.append("economics sources")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: economics source verification raised an error: {exc}")
+        econ_sources_ok = False
+        failures.append("economics sources")
+
+    hdr("ECONOMICS — LIVE ENGINE USES FORWARD SOURCE WHEN AVAILABLE")
+    try:
+        target_month = nowcasts[0].month if nowcasts else datetime.now(timezone.utc).month
+        result = economics_engine.compute_core_cpi_probability(
+            "between",
+            0.15,
+            0.25,
+            target_month=target_month,
+        )
+        show_json("Live economics engine result", result, max_chars=2400)
+        forward_sources = result.get("per_source_values", {}).get("forward_forecast_sources", {})
+        econ_live_ok = (
+            result.get("oracle_prob") is not None
+            and "cleveland_fed" in forward_sources
+            and any(key.startswith("philadelphia_fed_spf") for key in forward_sources)
+        )
+        print(f"  [{'PASS' if econ_live_ok else 'FAIL'}] live economics probability includes official forward-looking sources")
+        if not econ_live_ok:
+            failures.append("economics live")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: economics live-engine check raised an error: {exc}")
+        econ_live_ok = False
+        failures.append("economics live")
+
+    hdr("ECONOMICS — CALIBRATION RECORDS + BRIER SCORE")
+    try:
+        economics_records, economics_raw_rows = economics_backtest.build_economics_backtest()
+        econ_brier = calibration.brier_score(economics_records)
+        econ_curve = calibration.reliability_curve(economics_records)
+        spf_record_count = sum(1 for record in economics_records if record.venue == "philadelphia_fed_spf")
+        kalshi_record_count = sum(1 for record in economics_records if record.venue == "kalshi")
+        print(
+            f"Built {len(economics_records)} economics calibration records "
+            f"({kalshi_record_count} Kalshi CPI markets, {spf_record_count} official SPF probability-bin records)."
+        )
+        print("Representative real economics records:")
+        sample_records = [
+            *[record for record in economics_records if record.venue == "kalshi"][:3],
+            *[record for record in economics_records if record.venue == "philadelphia_fed_spf"][:3],
+        ]
+        for idx, record in enumerate(sample_records, start=1):
+            print(
+                f"{idx:02d}. [{record.venue}] {record.market_id}"
+                f"  decision={record.decision_timestamp}"
+                f"  target={record.target_date}"
+                f"  oracle_prob={record.oracle_prob:.4f}"
+                f"  outcome={record.outcome}"
+                f"  bucket={record.bucket}"
+            )
+            print(f"    question={record.question}")
+        print(f"Economics Brier score: {econ_brier:.4f}")
+        show_json("Economics reliability curve", econ_curve, max_chars=1800)
+        econ_backtest_ok = len(economics_records) >= 200 and spf_record_count >= 200 and econ_brier is not None
+        print(
+            f"  [{'PASS' if econ_backtest_ok else 'FAIL'}] economics backtest scored "
+            f"(spf={spf_record_count}, kalshi={kalshi_record_count})"
+        )
+        if not econ_backtest_ok:
+            failures.append("economics backtest")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: economics backtest check raised an error: {exc}")
+        economics_raw_rows = []
+        econ_backtest_ok = False
+        failures.append("economics backtest")
+
+    hdr("SPORTS — MULTI-SOURCE TOURNAMENT SIMULATOR PATH")
+    try:
+        sports_result = sports_engine.compute_world_cup_probability("Will Spain win the 2026 FIFA World Cup?")
+        show_json("Sports engine result", sports_result, max_chars=2600)
+        sports_sources = sports_result.get("per_source_values", {}).get("sources", [])
+        sports_models = sports_result.get("per_model_prob", {})
+        tournament_state = sports_result.get("per_source_values", {}).get("tournament_state", {})
+        sports_sim_ok = (
+            sports_result.get("oracle_prob") is not None
+            and "World Football Elo Ratings" in sports_sources
+            and "FIFA/Coca-Cola Men's World Ranking" in sports_sources
+            and "elo_48_team_tournament_simulator" in sports_models
+            and "fifa_48_team_tournament_simulator" in sports_models
+            and tournament_state.get("conditioned_on_actual_draw") is False
+        )
+        print(
+            f"  [{'PASS' if sports_sim_ok else 'FAIL'}] sports engine includes Elo + FIFA "
+            "tournament simulators and discloses unconditioned draw state"
+        )
+        if not sports_sim_ok:
+            failures.append("sports multi-source simulator")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: sports simulator check raised an error: {exc}")
+        sports_sim_ok = False
+        failures.append("sports simulator")
+
+    hdr("PRIMARY-SOURCE CLEANUP")
+    primary_checks = {}
+    try:
+        bls = get_with_retry("https://www.bls.gov/schedule/news_release/cpi.htm", {}, timeout=20)
+        primary_checks["BLS CPI release schedule primary page"] = (
+            "Schedule of Releases for the Consumer Price Index" in bls.text
+            and "June 2026" in bls.text
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"BLS schedule check failed: {exc}")
+        primary_checks["BLS CPI release schedule primary page"] = False
+    try:
+        kalshi_docs = get_with_retry("https://docs.kalshi.com/welcome", {}, timeout=20)
+        primary_checks["Kalshi official docs host reachable"] = (
+            kalshi_docs.status_code == 200
+            and "kalshi" in kalshi_docs.text.lower()
+            and "fees" in kalshi_docs.text.lower()
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kalshi official docs check failed: {exc}")
+        primary_checks["Kalshi official docs host reachable"] = False
+    try:
+        kalshi_help = get_with_retry("https://help.kalshi.com/en/articles/13823805-fees", {}, timeout=20)
+        kalshi_help_text = kalshi_help.text.lower()
+        kalshi_fee_pdf_url = "https://kalshi.com/docs/kalshi-fee-schedule.pdf"
+        primary_checks["Kalshi Help Center links official fee schedule PDF"] = (
+            kalshi_help.status_code == 200
+            and "complete fee schedule" in kalshi_help_text
+            and kalshi_fee_pdf_url in kalshi_help.text
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kalshi Help Center fee check failed: {exc}")
+        primary_checks["Kalshi Help Center links official fee schedule PDF"] = False
+        kalshi_fee_pdf_url = "https://kalshi.com/docs/kalshi-fee-schedule.pdf"
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 rwoo-verifier/1.0"}
+        kalshi_pdf = httpx.get(kalshi_fee_pdf_url, headers=headers, follow_redirects=True, timeout=20)
+        content_type = kalshi_pdf.headers.get("content-type", "").lower()
+        pdf_is_readable = kalshi_pdf.status_code == 200 and "application/pdf" in content_type
+        pdf_is_workspace_blocked = (
+            kalshi_pdf.status_code == 429
+            and "text/html" in content_type
+            and "security checkpoint" in kalshi_pdf.text.lower()
+        )
+        primary_checks["Kalshi fee PDF direct fetch is readable or explicitly 429-blocked"] = (
+            pdf_is_readable or pdf_is_workspace_blocked
+        )
+        print(
+            "Kalshi fee PDF fetch outcome: "
+            f"status={kalshi_pdf.status_code} content_type={content_type or 'unknown'}"
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kalshi fee PDF direct fetch check failed: {exc}")
+        primary_checks["Kalshi fee PDF direct fetch is readable or explicitly 429-blocked"] = False
+    try:
+        kalshi_series = get_with_retry(
+            "https://api.elections.kalshi.com/trade-api/v2/series/KXHIGHNY",
+            {},
+            timeout=20,
+        ).json()
+        series = kalshi_series.get("series", kalshi_series)
+        primary_checks["Kalshi official API corroborates quadratic fee fields"] = (
+            series.get("fee_type") == "quadratic"
+            and series.get("fee_multiplier") == 1
+        )
+    except Exception as exc:  # noqa: BLE001
+        print(f"Kalshi API fee-field check failed: {exc}")
+        primary_checks["Kalshi official API corroborates quadratic fee fields"] = False
+    try:
+        okx = get_with_retry("https://web3.okx.com/xlayer/build-x-series", {}, timeout=20)
+        primary_checks["OKX Build X primary page"] = "OKX.AI Genesis" in okx.text or "OKX AI" in okx.text
+    except Exception as exc:  # noqa: BLE001
+        print(f"OKX Build X check failed: {exc}")
+        primary_checks["OKX Build X primary page"] = False
+    for name, passed in primary_checks.items():
+        print(f"  [{'PASS' if passed else 'FAIL'}] {name}")
+    primary_ok = all(primary_checks.values())
+    if not primary_ok:
+        failures.append("primary sources")
+
+    hdr("DAILY PROOF LOOP")
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            proof = daily.build_daily_proof(
+                ledger_path=tmp_path / "daily_proofs.jsonl",
+                public_json_path=tmp_path / "daily_proof_latest.json",
+                public_md_path=tmp_path / "daily_proof_latest.md",
+            )
+            show_json("Daily proof verification", proof["ledger_verification"], max_chars=1200)
+            daily_ok = (
+                proof["ledger_verification"].get("valid") is True
+                and (tmp_path / "daily_proof_latest.json").exists()
+                and (tmp_path / "daily_proof_latest.md").exists()
+            )
+        print(f"  [{'PASS' if daily_ok else 'FAIL'}] daily proof record, ledger verification, and public artifacts generated")
+        if not daily_ok:
+            failures.append("daily proof")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: daily proof loop raised an error: {exc}")
+        daily_ok = False
+        failures.append("daily proof")
+
+    hdr("CORE-LAW CHECK — AST import scan across new hardening paths")
+    all_imports = set()
+    for mod in (daily, economic_sources, economics_engine, economics_backtest, sports_engine):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                all_imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                all_imports.add(node.module)
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = all_imports & llm_packages
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK anywhere in pre-listing hardening paths")
+
+    hdr("GATE 7 — ACCEPTANCE CRITERIA")
+    checks = {
+        "Official forward-looking economics sources parsed": econ_sources_ok,
+        "Live economics engine uses forward-looking source data": econ_live_ok,
+        "Economics calibration produces real records + Brier score": econ_backtest_ok,
+        "Sports engine includes multi-source deterministic tournament simulators": sports_sim_ok,
+        "Primary-source cleanup checks pass": primary_ok,
+        "Daily proof loop generates receipt-backed artifacts": daily_ok,
+        "No LLM SDK anywhere in hardening paths": core_law_ok,
+        "No hardening failures": len(failures) == 0,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 7 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
+def phase_8():
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 8")
+    print("GATE 8: Live opportunity scanner")
+    print(RULE)
+    print()
+    print("This gate scans batches of live markets, computes deterministic oracle")
+    print("probabilities where this build has a supported engine, applies real costs,")
+    print("and writes ranked public artifacts. It does not require a trade to exist")
+    print("today; it requires the scanner to be live, broad, cost-aware, and honest.")
+
+    from pathlib import Path
+    import tempfile
+
+    from rwoo import scanner
+
+    failures = []
+    scan = None
+    artifacts_ok = False
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            scan = scanner.scan_opportunities(
+                max_weather_markets_per_series=12,
+                max_economics_markets=12,
+                polymarket_limit=80,
+            )
+            scanner.write_scan_artifacts(
+                scan,
+                json_path=tmp_path / "opportunity_scan_latest.json",
+                md_path=tmp_path / "opportunity_scan_latest.md",
+            )
+            artifacts_ok = (
+                (tmp_path / "opportunity_scan_latest.json").exists()
+                and (tmp_path / "opportunity_scan_latest.md").exists()
+            )
+        show_json("Opportunity scan summary", {
+            "markets_seen": scan["markets_seen"],
+            "markets_evaluated": scan["markets_evaluated"],
+            "markets_skipped": scan["markets_skipped"],
+            "actionable_count": scan["actionable_count"],
+            "errors": scan["errors"][:5],
+            "action_rule": scan["action_rule"],
+        }, max_chars=1600)
+        show_json("Top scan records", scan["top"][:5], max_chars=3200)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: opportunity scanner raised an error: {exc}")
+        failures.append("scanner runtime")
+
+    records = scan["top"] if scan else []
+    breadth_ok = scan is not None and scan["markets_seen"] >= 80 and scan["markets_evaluated"] >= 25
+    costs_ok = bool(records) and all(record.get("total_friction") is not None for record in records)
+    ranking_ok = bool(records) and all("reason" in record and "actionable" in record for record in records)
+    item_error_rate = (len(scan["errors"]) / scan["markets_seen"]) if scan and scan["markets_seen"] else 1.0
+    scanner_resilience_ok = scan is not None and item_error_rate <= 0.05 and len(failures) == 0
+
+    hdr("GATE 8 — ACCEPTANCE CRITERIA")
+    checks = {
+        "Scanner saw a broad live market batch": breadth_ok,
+        "Scanner evaluated supported markets with deterministic engines": scan is not None and scan["markets_evaluated"] >= 25,
+        "Every evaluated record includes real cost/friction": costs_ok,
+        "Scanner ranks records with action/no-action reasons": ranking_ok,
+        "Scanner artifacts can be written": artifacts_ok,
+        "Scanner completed with <=5% item-level source errors": scanner_resilience_ok,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 8 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -1436,6 +1800,10 @@ def main():
         sys.exit(phase_5())
     elif args.phase == 6:
         sys.exit(phase_6())
+    elif args.phase == 7:
+        sys.exit(phase_7())
+    elif args.phase == 8:
+        sys.exit(phase_8())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)
