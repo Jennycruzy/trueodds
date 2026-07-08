@@ -33,7 +33,10 @@ disconnected from the call path.
 
 This build is phased, with a human-readable verification gate at the end of
 each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **Phase 3 complete** (foundations, market readers, the weather engine, and the edge computation with its reproducibility proof).
+project depends on, and how it was verified). Currently: **Phase 4 complete**
+(foundations, market readers, the weather engine, edge computation with its
+reproducibility proof, the restraint layer, and conservative economics/sports
+baseline engines).
 
 ## Reproduce every claim
 
@@ -46,6 +49,7 @@ python3 verify.py --phase 0   # foundations: live Open-Meteo, Kalshi, Polymarket
 python3 verify.py --phase 1   # market readers: canonical objects from live markets
 python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
 python3 verify.py --phase 3   # edge computation + a live reproducibility proof
+python3 verify.py --phase 4   # restraint layer + live BLS economics and Elo sports baselines
 ```
 
 Both make live network calls and print the real responses plus a
@@ -65,9 +69,16 @@ or a canned pass.
   - `engines/weather.py` — Stage 2 weather engine: multi-model ensemble
     consensus + confidence, plus a NASA POWER historical base rate. No LLM
     anywhere in this path — verified by an AST import check in the harness.
+  - `engines/economics.py` — Phase 4 conservative official-history baseline
+    for core-CPI markets using live BLS data; confidence capped until a
+    verified consensus-forecast distribution is added.
+  - `engines/sports.py` — Phase 4 conservative World Cup baseline using live
+    World Football Elo ratings; confidence capped until a fuller simulator and
+    independent sources are added.
   - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against
-    the oracle's own uncertainty band and real trading friction (Kalshi's
-    published fee formula + the live spread). Refuses non-actionable edges.
-  - (restraint layer, calibration record, receipts, econ/sports engines — later phases)
+    the oracle's own uncertainty band, source freshness, source/model agreement,
+    and real trading friction (Kalshi's published fee formula + the live
+    spread). Refuses non-actionable edges.
+  - (calibration record, receipts — later phases)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

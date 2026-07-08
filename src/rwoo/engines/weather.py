@@ -24,6 +24,8 @@ import httpx
 
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
+_FORECAST_CACHE: dict[tuple[float, float, str, str], dict[str, float]] = {}
+_HISTORICAL_CACHE: dict[tuple[float, float, int, int, int], dict[int, float]] = {}
 
 
 def _get_with_retry(url: str, params: dict, timeout: float = 20, attempts: int = 3) -> httpx.Response:
@@ -60,6 +62,9 @@ def _normal_cdf(z: float) -> float:
 
 def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_name: str) -> dict[str, float]:
     """target_date: 'YYYY-MM-DD'. Returns {model_name: forecast_max_temp_F}."""
+    cache_key = (round(lat, 4), round(lon, 4), target_date, timezone_name)
+    if cache_key in _FORECAST_CACHE:
+        return dict(_FORECAST_CACHE[cache_key])
     resp = _get_with_retry(
         OPEN_METEO_URL,
         params={
@@ -81,6 +86,7 @@ def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_nam
         values = daily.get(key)
         if values and values[0] is not None:
             out[model] = values[0]
+    _FORECAST_CACHE[cache_key] = dict(out)
     return out
 
 
@@ -88,6 +94,9 @@ def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, yea
     """Real historical daily max temps (°F) for the same calendar day across
     `years_back` years, from NASA POWER. Used only for the climatological
     base rate — never for the forecast probability itself."""
+    cache_key = (round(lat, 4), round(lon, 4), month, day, years_back)
+    if cache_key in _HISTORICAL_CACHE:
+        return dict(_HISTORICAL_CACHE[cache_key])
     end_year = datetime.now(timezone.utc).year - 1  # last fully-observed year
     start_year = end_year - years_back + 1
     resp = _get_with_retry(
@@ -111,6 +120,7 @@ def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, yea
         if date_str[4:8] == target_suffix and celsius is not None and celsius > -900:  # NASA POWER fill value is -999
             year = int(date_str[:4])
             out[year] = celsius * 9 / 5 + 32
+    _HISTORICAL_CACHE[cache_key] = dict(out)
     return out
 
 
@@ -145,6 +155,7 @@ def compute_weather_probability(
     strike_type: str,
     floor_strike,
     cap_strike,
+    include_base_rate: bool = True,
 ) -> dict:
     forecasts = fetch_model_forecasts(lat, lon, target_date, timezone_name)
     if len(forecasts) < 2:
@@ -192,13 +203,15 @@ def compute_weather_probability(
     prob_high = max(per_model_prob.values())
     confidence = 1.0 - (prob_high - prob_low)
 
-    month, day = int(target_date[5:7]), int(target_date[8:10])
-    historical = fetch_historical_daily_max(lat, lon, month, day)
-    if historical:
+    historical = {}
+    if include_base_rate:
+        month, day = int(target_date[5:7]), int(target_date[8:10])
+        historical = fetch_historical_daily_max(lat, lon, month, day)
+    if not historical:
+        base_rate = None
+    else:
         hits = sum(1 for v in historical.values() if check_resolution(v, strike_type, floor_strike, cap_strike))
         base_rate = hits / len(historical)
-    else:
-        base_rate = None
 
     return {
         "oracle_prob": oracle_prob,
@@ -216,6 +229,7 @@ def compute_weather_probability(
         "method": (
             f"ensemble mean/std over {len(forecasts)} independent models -> normal CDF "
             f"P(resolves yes) vs. strike_type={strike_type}"
+            f"{'' if include_base_rate else '; historical base-rate fetch intentionally skipped for this restraint-only check'}"
         ),
         "data_freshness": datetime.now(timezone.utc).isoformat(),
         "base_rate": base_rate,

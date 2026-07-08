@@ -22,6 +22,8 @@ Constants used here are cited, not invented:
 from datetime import datetime, timezone
 
 KALSHI_TAKER_FEE_RATE = 0.07
+DEFAULT_MAX_DATA_AGE_HOURS = 24.0
+DEFAULT_MIN_CONFIDENCE = 0.55
 
 
 def kalshi_taker_fee(price: float, fee_multiplier: float = 1.0) -> float:
@@ -80,7 +82,7 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
         "friction": friction,
     }
 
-    # Check 1 — is the data even still live, i.e. has resolution already passed?
+    # Check 1 — is the market still forecastable, i.e. has resolution already passed?
     if market.resolution_time:
         try:
             resolution_dt = datetime.fromisoformat(market.resolution_time.replace("Z", "+00:00"))
@@ -93,7 +95,40 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
         except ValueError:
             pass  # unparseable resolution_time is a Stage-1 data-quality issue, not this check's job
 
-    # Check 2 — is the edge beyond the oracle's own uncertainty?
+    # Check 2 — is the underlying data fresh enough to trust?
+    freshness = engine_result.get("data_freshness")
+    if freshness:
+        try:
+            freshness_dt = datetime.fromisoformat(str(freshness).replace("Z", "+00:00"))
+            age_hours = (now - freshness_dt).total_seconds() / 3600
+            if age_hours > DEFAULT_MAX_DATA_AGE_HOURS:
+                return {
+                    **base,
+                    "actionable": False,
+                    "reason": (
+                        f"data stale — source data was fetched {age_hours:.1f} hours ago, beyond "
+                        f"the {DEFAULT_MAX_DATA_AGE_HOURS:.0f}-hour limit"
+                    ),
+                }
+        except ValueError:
+            return {
+                **base,
+                "actionable": False,
+                "reason": "data freshness timestamp is unparseable — cannot certify source recency",
+            }
+
+    # Check 3 — do the sources/models agree enough to call an edge?
+    if confidence is not None and confidence < DEFAULT_MIN_CONFIDENCE:
+        return {
+            **base,
+            "actionable": False,
+            "reason": (
+                f"confidence low — sources/models disagree or are too thin "
+                f"(confidence {confidence:.4f} < {DEFAULT_MIN_CONFIDENCE:.2f})"
+            ),
+        }
+
+    # Check 4 — is the edge beyond the oracle's own uncertainty?
     if prob_low is not None and prob_high is not None and prob_low <= implied <= prob_high:
         return {
             **base,
@@ -104,7 +139,7 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
             ),
         }
 
-    # Check 3 — is the edge beyond real trading friction?
+    # Check 5 — is the edge beyond real trading friction?
     if abs(edge_points) <= friction["total_friction"]:
         return {
             **base,

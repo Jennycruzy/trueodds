@@ -12,6 +12,8 @@ libraries are used as building blocks.
 - **[NASA POWER](https://power.larc.nasa.gov/)** — climatological baselines.
 - **[Kalshi](https://kalshi.com/)** — regulated US prediction market; public market-data API.
 - **[Polymarket](https://polymarket.com/)** — on-chain prediction market; Gamma and CLOB public APIs.
+- **[Bureau of Labor Statistics public API](https://www.bls.gov/developers/)** — official seasonally adjusted core CPI history for the Phase 4 economics baseline.
+- **[World Football Elo Ratings](https://www.eloratings.net/)** — public national-team Elo ratings TSV data for the Phase 4 World Cup sports baseline.
 
 ## Planned libraries (to be added as implementation proceeds, with versions pinned in requirements.txt)
 

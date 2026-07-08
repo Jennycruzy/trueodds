@@ -16,6 +16,7 @@ import subprocess
 import sys
 import textwrap
 import time
+from datetime import datetime, timedelta, timezone
 
 import httpx
 
@@ -384,11 +385,16 @@ def phase_2():
               f"cap_strike={raw.get('cap_strike')}, strike_type={strike_type}")
         print()
 
-        result = weather.compute_weather_probability(
-            lat=station.lat, lon=station.lon, target_date=target_date,
-            timezone_name="America/New_York",
-            strike_type=strike_type, floor_strike=raw.get("floor_strike"), cap_strike=raw.get("cap_strike"),
-        )
+        try:
+            result = weather.compute_weather_probability(
+                lat=station.lat, lon=station.lon, target_date=target_date,
+                timezone_name="America/New_York",
+                strike_type=strike_type, floor_strike=raw.get("floor_strike"), cap_strike=raw.get("cap_strike"),
+            )
+        except Exception as exc:  # noqa: BLE001
+            print(f"FAIL: live weather-engine call raised an error: {exc}")
+            all_checks.append(False)
+            continue
 
         if result["refused"]:
             print(f"REFUSED: {result['reason']}")
@@ -648,6 +654,217 @@ def phase_3():
     return 0 if all_pass else 1
 
 
+def _month_from_event_ticker(event_ticker: str) -> int:
+    suffix = event_ticker.rsplit("-", 1)[-1]
+    month_abbr = suffix[2:5].upper()
+    months = {
+        "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+        "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+    }
+    return months[month_abbr]
+
+
+def _find_polymarket_question(question: str):
+    from rwoo.readers import polymarket
+
+    for market in polymarket.fetch_canonical_markets(limit=50):
+        if market.question == question:
+            return market
+    raise RuntimeError(f"Could not find live Polymarket question: {question}")
+
+
+def phase_4():
+    from rwoo import edge as edge_mod
+    from rwoo.engines import economics, sports, weather
+    from rwoo.readers import kalshi
+    from rwoo.weather_stations import station_for_series
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 4")
+    print("GATE 4: Restraint layer + economics/sports engines")
+    print(RULE)
+    print()
+    print("Discipline restatement for this phase:")
+    print("  I am building a deterministic odds oracle, not a prediction-writing chatbot.")
+    print("  Every probability below is computed by code over live source data; an LLM may")
+    print("  route or narrate, but it may not create or adjust the number. Forbidden actions")
+    print("  remain: no fabricated probabilities, no hidden stubs, no fake calibration, and")
+    print("  no confident edge when the honest answer is stale/uncertain/inside costs.")
+    print("  Doctrine: never assume, verify.\n")
+
+    failures = []
+
+    hdr("RESTRAINT CHECK A — within-noise edge on a real weather market")
+    within_noise_ok = False
+    try:
+        event_ticker = "KXHIGHNY-26JUL09"
+        station = station_for_series("KXHIGHNY")
+        markets = kalshi.fetch_markets_for_event(event_ticker)
+        target_date = kalshi.parse_event_date(event_ticker)
+        selected = [m for m in markets if m.market_id.endswith("B87.5")]
+        for m in selected or markets:
+            raw = m.raw["market"]
+            result = weather.compute_weather_probability(
+                lat=station.lat,
+                lon=station.lon,
+                target_date=target_date,
+                timezone_name="America/New_York",
+                strike_type=raw["strike_type"],
+                floor_strike=raw.get("floor_strike"),
+                cap_strike=raw.get("cap_strike"),
+                include_base_rate=False,
+            )
+            e = edge_mod.compute_edge(m, result)
+            if "within noise" in e.get("reason", ""):
+                print(m.describe())
+                print(f"  oracle_prob={result['oracle_prob']:.4f}")
+                print(f"  uncertainty band=[{result['prob_low']:.4f}, {result['prob_high']:.4f}]")
+                print(f"  edge decision: actionable={e['actionable']} reason={e['reason']}")
+                within_noise_ok = True
+                break
+        if not within_noise_ok:
+            print("FAIL: no tested live weather market had its implied probability inside the uncertainty band.")
+            failures.append("within-noise restraint")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: within-noise restraint check raised an error: {exc}")
+        failures.append("within-noise restraint")
+
+    hdr("RESTRAINT CHECK B — stale data guard")
+    stale_ok = False
+    try:
+        event_ticker = "KXHIGHNY-26JUL09"
+        station = station_for_series("KXHIGHNY")
+        m = kalshi.fetch_markets_for_event(event_ticker)[0]
+        raw = m.raw["market"]
+        fresh = weather.compute_weather_probability(
+            lat=station.lat,
+            lon=station.lon,
+            target_date=kalshi.parse_event_date(event_ticker),
+            timezone_name="America/New_York",
+            strike_type=raw["strike_type"],
+            floor_strike=raw.get("floor_strike"),
+            cap_strike=raw.get("cap_strike"),
+            include_base_rate=False,
+        )
+        stale = dict(fresh)
+        stale["data_freshness"] = (datetime.now(timezone.utc) - timedelta(hours=49)).isoformat()
+        e = edge_mod.compute_edge(m, stale)
+        print("Real probability inputs were fetched first, then only the freshness timestamp")
+        print("was aged as a red-team guardrail test. No probability was changed or fabricated.")
+        print(f"  original oracle_prob={fresh.get('oracle_prob'):.4f}")
+        print(f"  aged data_freshness={stale['data_freshness']}")
+        print(f"  edge decision: actionable={e['actionable']} reason={e['reason']}")
+        stale_ok = (not e["actionable"]) and "data stale" in e["reason"]
+        if not stale_ok:
+            failures.append("stale-data restraint")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: stale-data restraint check raised an error: {exc}")
+        failures.append("stale-data restraint")
+
+    hdr("ECONOMICS ENGINE — real Kalshi core-CPI market + official BLS data")
+    econ_ok = False
+    try:
+        event_ticker = "KXCPICORE-26JUL"
+        markets = kalshi.fetch_markets_for_event(event_ticker)
+        market = next((m for m in markets if m.raw["market"].get("strike_type") == "greater"), markets[0])
+        raw = market.raw["market"]
+        result = economics.compute_core_cpi_probability(
+            strike_type=raw["strike_type"],
+            floor_strike=raw.get("floor_strike"),
+            cap_strike=raw.get("cap_strike"),
+            target_month=_month_from_event_ticker(event_ticker),
+        )
+        e = edge_mod.compute_edge(market, result)
+        print(market.describe())
+        print("Official BLS evidence used by the engine:")
+        show_json("BLS-derived core-CPI features", result["per_source_values"], max_chars=1600)
+        print("Per-model deterministic probabilities:")
+        for name, val in result["per_model_prob"].items():
+            print(f"  {name}: {val:.4f}")
+        print(f"oracle_prob={result['oracle_prob']:.4f} confidence={result['confidence']:.4f} "
+              f"band=[{result['prob_low']:.4f}, {result['prob_high']:.4f}]")
+        print(f"edge decision: actionable={e['actionable']} reason={e['reason']}")
+        econ_ok = (
+            not result["refused"]
+            and 0.0 <= result["oracle_prob"] <= 1.0
+            and "BLS" in result["per_source_values"]["source"]
+            and "confidence low" in e["reason"]
+        )
+        if not econ_ok:
+            failures.append("economics engine")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: economics engine raised an error: {exc}")
+        failures.append("economics engine")
+
+    hdr("SPORTS ENGINE — real Polymarket World Cup market + live Elo ratings")
+    sports_ok = False
+    try:
+        market = _find_polymarket_question("Will Spain win the 2026 FIFA World Cup?")
+        result = sports.compute_world_cup_probability(market.question)
+        e = edge_mod.compute_edge(market, result)
+        print(market.describe())
+        print("Live Elo evidence used by the engine:")
+        show_json("World Football Elo features", result["per_source_values"], max_chars=1800)
+        print("Per-model deterministic probabilities:")
+        for name, val in result["per_model_prob"].items():
+            print(f"  {name}: {val:.4f}")
+        print(f"oracle_prob={result['oracle_prob']:.4f} confidence={result['confidence']:.4f} "
+              f"band=[{result['prob_low']:.4f}, {result['prob_high']:.4f}]")
+        print(f"edge decision: actionable={e['actionable']} reason={e['reason']}")
+        sports_ok = (
+            not result["refused"]
+            and 0.0 <= result["oracle_prob"] <= 1.0
+            and result["per_source_values"]["source"] == "World Football Elo Ratings"
+            and "confidence low" in e["reason"]
+        )
+        if not sports_ok:
+            failures.append("sports engine")
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: sports engine raised an error: {exc}")
+        failures.append("sports engine")
+
+    hdr("CORE-LAW CHECK — AST import scan across new Phase 4 number paths")
+    import ast
+    import inspect
+    all_imports = set()
+    for mod in (economics, sports, edge_mod):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                all_imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                all_imports.add(node.module)
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = all_imports & llm_packages
+    print(f"Modules imported across economics.py + sports.py + edge.py: {sorted(all_imports)}")
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK anywhere in Phase 4 number paths")
+
+    hdr("GATE 4 — ACCEPTANCE CRITERIA")
+    checks = {
+        "Within-noise restraint refused a real market whose implied probability sat inside the band": within_noise_ok,
+        "Stale-data restraint refused aged real inputs": stale_ok,
+        "Economics engine ran end to end on a real Kalshi CPI market using official BLS data": econ_ok,
+        "Sports engine ran end to end on a real Polymarket World Cup market using live Elo ratings": sports_ok,
+        "Low-confidence/disagreeing/thin-source outputs were downgraded, not called actionable": econ_ok and sports_ok,
+        "No LLM SDK anywhere in the Phase 4 probability/edge computation path": core_law_ok,
+        "No live-call failures": len(failures) == 0,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 4 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -661,6 +878,8 @@ def main():
         sys.exit(phase_2())
     elif args.phase == 3:
         sys.exit(phase_3())
+    elif args.phase == 4:
+        sys.exit(phase_4())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)

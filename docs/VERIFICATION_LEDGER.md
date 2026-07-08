@@ -169,7 +169,14 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 
 ## 12. Economic data sources
 
-- **Status:** not yet verified — out of scope for GATE 0 (Phase 0 only mandates weather + Kalshi + Polymarket + OKX facts). Deferred to Phase 4 (econ/sports engines): BLS release calendar/API, Federal Reserve releases, and a consensus-forecast source (e.g. an econ-calendar provider) will each get their own live-call verification row before the econ engine is built.
+- **Needed:** a real official source for a volume-domain economics engine, plus a live economics market whose exact resolution rule names that source.
+- **Verified:** live calls, 2026-07-08.
+  - Kalshi event: `GET https://api.elections.kalshi.com/trade-api/v2/events/KXCPICORE-26JUL`
+  - BLS API: `POST https://api.bls.gov/publicAPI/v2/timeseries/data/` with `seriesid=["CUSR0000SA0L1E"]`
+- **Found:** Kalshi's `KXCPICORE-26JUL-T0.0` market resolves on the **seasonally adjusted Consumer Price Index for All Urban Consumers: All Items less Food and Energy** for July 2026, published by the **Bureau of Labor Statistics**, and asks whether the single-decimal month-over-month value is above 0.0%. The BLS public API returns the required official seasonally adjusted core-CPI index under series `CUSR0000SA0L1E`; Phase 4 converts consecutive monthly index values into month-over-month percentage changes and rounds to the single decimal used by Kalshi's rule.
+- **Important bug caught during Phase 4:** one oversized unauthenticated BLS request for `2016-2026` returned data only through `2025-12` even though newer 2026 observations existed. A direct shorter live request (`2024-2026`) returned `2026-05` as the latest observation. Code now fetches BLS history in <=10-year chunks and deduplicates rows so the latest official value is not silently dropped. Phase 4 harness output showed the corrected latest observation: `2026-05`, index value `336.121`.
+- **Method status:** the Phase 4 economics engine is a conservative official-history baseline, not a finished macro forecast engine. It uses real BLS history and reports a deterministic probability, but confidence is capped at 0.50 because a verified consensus-forecast distribution has **not** yet been integrated. The restraint layer correctly downgraded the live CPI run as low-confidence/thin-source rather than actionable.
+- **Gap:** a real consensus-forecast distribution source for CPI/PCE remains unresolved and must be verified before the economics engine can be treated as production-quality.
 
 ---
 
@@ -182,5 +189,18 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 
 ---
 
-### Ledger status as of 2026-07-08 (Phase 3)
-All GATE 0–3-required facts are verified with real evidence above. Three items remain explicitly flagged as **open and not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), and the primary Kalshi fee-schedule PDF (§13, blocked by a bot-checkpoint — the formula itself is cross-validated via independent secondary sources plus live API corroboration, but the primary document has not been read directly).
+## 14. Sports data source — World Football Elo Ratings
+
+- **Needed:** a real public sports rating source for an end-to-end sports market run that does not copy the market price.
+- **Verified:** live calls, 2026-07-08.
+  - Polymarket market read: `GET https://gamma-api.polymarket.com/markets?limit=50&closed=false`
+  - Rating table: `GET https://www.eloratings.net/World.tsv`
+  - Team-name table: `GET https://www.eloratings.net/en.teams.tsv`
+- **Found:** Polymarket exposed live 2026 FIFA World Cup outright markets, including "Will Spain win the 2026 FIFA World Cup?", with live bid/ask and a resolution rule naming FIFA as the primary resolution source. World Football Elo exposes the current national-team rating table as plain TSV. Field mapping was verified from `https://www.eloratings.net/scripts/ratings.js`: `pushRatingRow` maps `fields[2]` to team code and `fields[3]` to rating. Phase 4 harness output showed Spain ranked #1 with rating `2177`, and the top eight teams/rating values from the live table.
+- **Method status:** the Phase 4 sports engine converts that live Elo table into two deterministic baselines (`elo_rating_softmax_top64` and `elo_rank_decay_top64`). Confidence is capped at 0.45 because both transforms come from one public rating source and this is not yet a full tournament simulator. The restraint layer correctly downgraded the live sports run as low-confidence/thin-source rather than actionable.
+- **Gap:** a production sports engine should add bracket/team-qualification state, injuries/lineups where relevant, and either multiple independent rating sources or a calibrated simulator. Phase 4 only proves an honest deterministic volume-domain path.
+
+---
+
+### Ledger status as of 2026-07-08 (Phase 4)
+All GATE 0–4-required facts are verified with real evidence above. Open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), the primary Kalshi fee-schedule PDF (§13), the economics consensus-forecast distribution (§12), and production-grade sports model inputs (§14).
