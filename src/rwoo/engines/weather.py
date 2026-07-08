@@ -151,6 +151,8 @@ def compute_weather_probability(
         return {
             "oracle_prob": None,
             "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
             "per_source_values": forecasts,
             "method": "insufficient_models",
             "data_freshness": datetime.now(timezone.utc).isoformat(),
@@ -173,9 +175,22 @@ def compute_weather_probability(
     # 100% agreement, not 0% — frac_models_yes alone reads backwards for that
     # case, so report both.
     model_unanimity = max(frac_models_yes, 1 - frac_models_yes)
-    # Confidence: 1.0 at perfect model agreement (std=0, floored at MIN_STD_F),
-    # decaying linearly to 0 by an 8°F spread — stated plainly, not hidden.
-    confidence = max(0.0, 1.0 - std / 8.0)
+
+    # Uncertainty band: what would the probability be if each individual
+    # model, on its own, were the whole truth (with only the same MIN_STD_F
+    # precision floor already defined above — no new constant introduced)?
+    # The spread between the most bullish and least bullish of those
+    # per-model probabilities *is* the ensemble's honest disagreement, in the
+    # same units as oracle_prob itself — so Stage 3 can compare an implied
+    # probability against this band directly, and confidence falls out of it
+    # for free instead of needing a separately invented decay formula.
+    per_model_prob = {
+        model: min(1.0, max(0.0, _probability_from_ensemble(v, MIN_STD_F, strike_type, floor_strike, cap_strike)))
+        for model, v in forecasts.items()
+    }
+    prob_low = min(per_model_prob.values())
+    prob_high = max(per_model_prob.values())
+    confidence = 1.0 - (prob_high - prob_low)
 
     month, day = int(target_date[5:7]), int(target_date[8:10])
     historical = fetch_historical_daily_max(lat, lon, month, day)
@@ -188,6 +203,9 @@ def compute_weather_probability(
     return {
         "oracle_prob": oracle_prob,
         "confidence": confidence,
+        "prob_low": prob_low,
+        "prob_high": prob_high,
+        "per_model_prob": per_model_prob,
         "per_source_values": forecasts,
         "per_model_vote": per_model_vote,
         "frac_models_voting_yes": frac_models_yes,

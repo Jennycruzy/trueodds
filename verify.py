@@ -12,13 +12,15 @@ to fake a pass — if an API is unreachable, the check FAILs honestly.
 import argparse
 import json
 import os
+import subprocess
 import sys
 import textwrap
 import time
 
 import httpx
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
+REPO_ROOT = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(REPO_ROOT, "src"))
 
 RULE = "=" * 78
 
@@ -463,6 +465,189 @@ def phase_2():
     return 0 if all_pass else 1
 
 
+_REPRODUCTION_SCRIPT = """
+import socket
+def _blocked(*a, **kw):
+    raise RuntimeError("NETWORK ACCESS ATTEMPTED — this must not happen in a pure reproduction")
+socket.socket.connect = _blocked
+
+import sys
+sys.path.insert(0, {src_path!r})
+import statistics
+from rwoo.engines.weather import _probability_from_ensemble, MIN_STD_F
+
+forecasts = {forecasts!r}
+strike_type = {strike_type!r}
+floor_strike = {floor_strike!r}
+cap_strike = {cap_strike!r}
+
+values = list(forecasts.values())
+mean = statistics.fmean(values)
+std = statistics.pstdev(values)
+oracle_prob = min(1.0, max(0.0, _probability_from_ensemble(mean, std, strike_type, floor_strike, cap_strike)))
+
+per_model_prob = {{
+    m: min(1.0, max(0.0, _probability_from_ensemble(v, MIN_STD_F, strike_type, floor_strike, cap_strike)))
+    for m, v in forecasts.items()
+}}
+prob_low = min(per_model_prob.values())
+prob_high = max(per_model_prob.values())
+confidence = 1.0 - (prob_high - prob_low)
+
+print(repr(oracle_prob))
+print(repr(confidence))
+"""
+
+
+def phase_3():
+    from rwoo import edge as edge_mod
+    from rwoo.engines import weather
+    from rwoo.readers import kalshi
+    from rwoo.weather_stations import station_for_series
+
+    print(RULE)
+    print("REAL-WORLD ODDS ORACLE — VERIFY.PY --phase 3")
+    print("GATE 3: Edge computation + the Deterministic-Core proof (decisive phase)")
+    print(RULE)
+    print()
+    print("What this checks: for real, currently-trading markets, does the edge")
+    print("computation correctly refuse small/noisy edges and only call an edge")
+    print("actionable when it clears BOTH the oracle's own uncertainty band and")
+    print("real trading friction? And separately: can the exact same probability")
+    print("be reproduced from nothing but frozen data, with network access blocked")
+    print("at the OS socket level — proving no LLM (or anything else) is hiding in")
+    print("the number path?")
+
+    event_ticker = "KXHIGHNY-26JUL08"  # today's event — has real actively-traded quotes
+    series_ticker = "KXHIGHNY"
+    station = station_for_series(series_ticker)
+    target_date = kalshi.parse_event_date(event_ticker)
+
+    hdr(f"Reading real, currently-trading markets: event {event_ticker}")
+    markets = kalshi.fetch_markets_for_event(event_ticker)
+    print(f"Station: {station.name}   Target date: {target_date}")
+    print(f"Found {len(markets)} real markets. Computing engine + edge for each.\n")
+
+    rows = []
+    for m in markets:
+        raw = m.raw["market"]
+        result = weather.compute_weather_probability(
+            lat=station.lat, lon=station.lon, target_date=target_date,
+            timezone_name="America/New_York",
+            strike_type=raw["strike_type"], floor_strike=raw.get("floor_strike"), cap_strike=raw.get("cap_strike"),
+        )
+        e = edge_mod.compute_edge(m, result)
+        rows.append((m, raw, result, e))
+
+        hdr(f"Market: {m.question}")
+        print(f"Kalshi implied probability (bid/ask midpoint): {m.implied_prob:.4f}   spread: {m.spread:.4f}")
+        if result["refused"]:
+            print(f"Engine REFUSED: {result['reason']}")
+            continue
+        print(f"oracle_prob: {result['oracle_prob']:.4f}   confidence: {result['confidence']:.4f}   "
+              f"uncertainty band: [{result['prob_low']:.4f}, {result['prob_high']:.4f}]")
+        print(f"side: {e['side']}   edge_points: {e['edge_points']:+.4f}")
+        fr = e["friction"]
+        print(f"friction: half-spread {fr['half_spread']:.4f} + fee {fr['fee']:.4f} = {fr['total_friction']:.4f}  ({fr['method']})")
+        print(f"  -> ACTIONABLE: {e['actionable']}   reason: {e['reason']}")
+
+    non_actionable = [r for r in rows if not r[3]["actionable"]]
+    actionable = [r for r in rows if r[3]["actionable"]]
+
+    hdr("Honest flag on the largest actionable edge found")
+    if actionable:
+        biggest = max(actionable, key=lambda r: abs(r[3]["edge_points"]))
+        m, raw, result, e = biggest
+        print(f"'{m.question}' shows a {abs(e['edge_points']):.2f}-point edge — larger than a")
+        print("liquid, actively-traded weather market would normally mis-price by. The honest")
+        print("read is NOT 'free money found' — it is a signal that the current uncertainty-band")
+        print("method (a 3-model ensemble with a stated MIN_STD_F floor) is likely still")
+        print("overconfident near a threshold, exactly the risk flagged at the end of Phase 2.")
+        print("This is precisely why Phase 5's calibration backtest exists: to test this method")
+        print("against many real past outcomes before any edge this size is treated as real.")
+    else:
+        print("No actionable edge was found among today's markets (nothing to flag).")
+
+    hdr("GATE 3 — REPRODUCIBILITY PROOF (the Deterministic-Core Law, made undeniable)")
+    if not actionable and not non_actionable:
+        print("No markets available to reproduce.")
+        repro_ok = False
+    else:
+        m, raw, result, e = (actionable or non_actionable)[0]
+        frozen_forecasts = result["per_source_values"]
+        print(f"Freezing the exact live inputs already fetched above for '{m.question}':")
+        print(f"  forecasts = {frozen_forecasts}")
+        print(f"  strike_type={raw['strike_type']!r} floor_strike={raw.get('floor_strike')!r} cap_strike={raw.get('cap_strike')!r}")
+        print()
+        print("Now recomputing oracle_prob and confidence from ONLY these frozen numbers,")
+        print("twice, in two independent fresh Python processes with socket.socket.connect")
+        print("monkeypatched to raise — i.e. network access is impossible, not just unused.")
+
+        script = _REPRODUCTION_SCRIPT.format(
+            src_path=os.path.join(REPO_ROOT, "src"),
+            forecasts=frozen_forecasts,
+            strike_type=raw["strike_type"],
+            floor_strike=raw.get("floor_strike"),
+            cap_strike=raw.get("cap_strike"),
+        )
+        runs = []
+        repro_ok = True
+        for i in (1, 2):
+            proc = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, timeout=30)
+            if proc.returncode != 0:
+                print(f"  Run {i}: FAILED — {proc.stderr.strip().splitlines()[-1] if proc.stderr else 'unknown error'}")
+                repro_ok = False
+                continue
+            out_prob, out_conf = proc.stdout.strip().splitlines()
+            runs.append((float(out_prob), float(out_conf)))
+            print(f"  Run {i} (isolated process, network blocked): oracle_prob={out_prob}  confidence={out_conf}")
+
+        if repro_ok and len(runs) == 2:
+            identical = runs[0] == runs[1]
+            matches_live = abs(runs[0][0] - result["oracle_prob"]) < 1e-12
+            print(f"\n  Run 1 == Run 2 (bit-for-bit): {identical}")
+            print(f"  Matches the original live-computed oracle_prob ({result['oracle_prob']!r}): {matches_live}")
+            repro_ok = identical and matches_live
+
+    hdr("CORE-LAW CHECK — AST import scan across the whole number path")
+    import ast
+    import inspect
+    all_imports = set()
+    for mod in (weather, edge_mod):
+        tree = ast.parse(inspect.getsource(mod))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                all_imports.update(a.name for a in node.names)
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                all_imports.add(node.module)
+    llm_packages = {"openai", "anthropic", "cohere", "transformers", "langchain"}
+    matched = all_imports & llm_packages
+    print(f"Modules imported across weather.py + edge.py: {sorted(all_imports)}")
+    print(f"LLM-SDK imports found: {matched or 'none'}")
+    core_law_ok = len(matched) == 0
+    print(f"  [{'PASS' if core_law_ok else 'FAIL'}] no LLM SDK anywhere in the probability-or-edge computation path")
+
+    hdr("GATE 3 — ACCEPTANCE CRITERIA")
+    checks = {
+        "At least one market correctly judged non-actionable (within noise or friction)": len(non_actionable) >= 1,
+        "Every computed edge shows side, magnitude, and a stated reason": all(r[3].get("reason") for r in rows if not r[2]["refused"]),
+        "Reproducibility proof: identical output from frozen data with network blocked": repro_ok,
+        "No LLM SDK anywhere in the probability/edge computation path": core_law_ok,
+    }
+    all_pass = True
+    for name, passed in checks.items():
+        status = "PASS" if passed else "FAIL"
+        if not passed:
+            all_pass = False
+        print(f"  [{status}] {name}")
+
+    print()
+    print(RULE)
+    print(f"GATE 3 OVERALL: {'PASS' if all_pass else 'FAIL'}")
+    print(RULE)
+    return 0 if all_pass else 1
+
+
 def main():
     parser = argparse.ArgumentParser(description="Real-World Odds Oracle verification harness")
     parser.add_argument("--phase", type=int, required=True, help="which phase gate to run")
@@ -474,6 +659,8 @@ def main():
         sys.exit(phase_1())
     elif args.phase == 2:
         sys.exit(phase_2())
+    elif args.phase == 3:
+        sys.exit(phase_3())
     else:
         print(f"Phase {args.phase} harness is not built yet.")
         sys.exit(2)

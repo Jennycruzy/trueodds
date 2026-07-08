@@ -173,5 +173,14 @@ Log format per entry: **What I needed → Where verified → What I found → Da
 
 ---
 
-### Ledger status as of 2026-07-08 (Phase 0)
-All GATE 0-required facts are verified with real evidence above. Two items are explicitly flagged as **open and not assumed**: the Payment SDK settlement token (§7) and the primary hackathon rules page (§9) — both will be re-verified live at the phase that actually depends on them (7 and 9 respectively) rather than guessed now.
+## 13. Kalshi trading fee formula — for Stage 3's friction estimate
+
+- **Needed:** the real cost of trading a Kalshi contract (beyond the quoted bid/ask spread), so Stage 3 can refuse edges that are smaller than genuine trading cost rather than an invented number.
+- **Verified:** WebSearch across multiple independent secondary sources (predictionhunt.com, marketmath.io, botforkalshi.com — all describing the same formula independently), 2026-07-08. **Primary source attempt:** `help.kalshi.com/trading/fees` (fetched live — confirms fees exist and points to a fee-schedule PDF, but doesn't itself state the formula) and `kalshi.com/docs/kalshi-fee-schedule.pdf` (fetch attempt returned an HTTP 429 / Vercel bot-checkpoint HTML page, not the document — **this gap is disclosed, not papered over**).
+- **Found:** taker fee = `ceil_to_cent(fee_multiplier * 0.07 * contracts * price * (1-price))`; maker fee uses `0.0175` instead of `0.07`. **Cross-validated against Kalshi's own live API**, independent of the secondary sources: real market objects returned by `GET /trade-api/v2/series/{ticker}` carry `"fee_type": "quadratic"` and a `"fee_multiplier"` field — `price * (1-price)` is exactly quadratic in price, and `fee_multiplier` is exactly the `M` term the secondary sources describe. The live API field and the independently-sourced formula corroborate each other.
+- **Used as:** `KALSHI_TAKER_FEE_RATE = 0.07` in `src/rwoo/edge.py`, applied as `0.07 * P * (1-P)` per $1-notional contract, added to half the live quoted spread for the total friction estimate. Polymarket's fee schedule has **not** been verified at all — Stage 3 uses spread only for Polymarket markets and states that gap explicitly in the friction method string returned to the caller, rather than guessing a fee.
+
+---
+
+### Ledger status as of 2026-07-08 (Phase 3)
+All GATE 0–3-required facts are verified with real evidence above. Three items remain explicitly flagged as **open and not assumed**: the Payment SDK settlement token (§7), the primary hackathon rules page (§9), and the primary Kalshi fee-schedule PDF (§13, blocked by a bot-checkpoint — the formula itself is cross-validated via independent secondary sources plus live API corroboration, but the primary document has not been read directly).
