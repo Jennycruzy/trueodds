@@ -1210,7 +1210,7 @@ def phase_6():
         print("  [PASS] real X Layer mainnet anchor produced")
     else:
         print("  [FAIL] no real X Layer mainnet anchor produced")
-        print("  Honest blocker: a funded X Layer signer / approved OKX Agentic Wallet action is required.")
+        print("  Honest blocker: the OKX Agentic Wallet anchoring flow is not yet verified/approved.")
 
     hdr("CORE-LAW CHECK — AST import scan across receipt/anchoring paths")
     import ast

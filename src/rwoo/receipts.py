@@ -1,8 +1,8 @@
 """Receipt commitments and append-only ledger.
 
 Phase 6 local integrity is fully deterministic: canonical JSON -> SHA3-256
-record hash -> hash chain. Ethereum/X Layer anchoring will need true keccak256
-and a funded signer; the verification harness reports that prerequisite
+record hash -> hash chain. X Layer anchoring should go through the verified OKX
+Agentic Wallet path; the verification harness reports that prerequisite
 honestly instead of pretending a local hash is an on-chain anchor.
 """
 from __future__ import annotations

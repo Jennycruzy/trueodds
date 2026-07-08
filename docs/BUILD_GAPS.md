@@ -46,17 +46,19 @@ Do in Phase 6:
 - [x] Add a tamper test to the verification harness.
 - [x] Verify X Layer RPC path.
 - [ ] Verify X Layer anchoring cost/token facts beyond RPC chain ID.
-- [ ] If wallet/gas prerequisites are available, anchor a real commitment on
-      X Layer mainnet and print the transaction/explorer evidence.
-- [x] If wallet/gas prerequisites are not available, make the gate fail or mark
-      the exact operator prerequisite honestly; do not fake an anchor.
+- [ ] Verify the OKX Agentic Wallet transaction-signing flow for anchoring a
+      real commitment on X Layer mainnet.
+- [ ] If OKX Agentic Wallet anchoring is approved and available, anchor a real
+      commitment on X Layer mainnet and print the transaction/explorer evidence.
+- [x] If OKX Agentic Wallet anchoring is not yet verified/approved, make the
+      gate fail and mark that exact prerequisite honestly; do not fake an anchor.
 
 Current Phase 6 blocker:
 
 - `python3 verify.py --phase 6` passes local integrity checks but fails the
-  full gate because no funded X Layer signer / approved OKX Agentic Wallet
-  action is available. Do not mark Gate 6 complete until a real X Layer
-  mainnet transaction/explorer link is produced.
+  full gate because the OKX Agentic Wallet anchoring flow is not yet
+  verified/approved. Do not mark Gate 6 complete until a real X Layer mainnet
+  transaction/explorer link is produced through that path.
 
 ## Gaps From Completed Phases Not Fully Covered By The Immediate Next Phase
 

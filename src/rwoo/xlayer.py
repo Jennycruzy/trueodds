@@ -1,8 +1,8 @@
 """X Layer anchoring helpers.
 
-This module verifies the live RPC path and reports whether the environment has
-the prerequisites for a real mainnet anchor. It deliberately does not fake a
-transaction when a signer is missing.
+This module verifies the live RPC path and reports whether the OKX Agentic
+Wallet anchoring path has been verified and approved. It deliberately does not
+fall back to an unverified raw-key transaction or fake a mainnet anchor.
 """
 from __future__ import annotations
 
@@ -47,13 +47,18 @@ def verify_rpc_endpoints() -> list[dict[str, Any]]:
 
 
 def anchoring_prerequisites() -> dict[str, Any]:
-    private_key_present = bool(os.environ.get("XLAYER_PRIVATE_KEY"))
+    raw_private_key_present = bool(os.environ.get("XLAYER_PRIVATE_KEY"))
     return {
-        "ready": private_key_present,
-        "missing": [] if private_key_present else ["XLAYER_PRIVATE_KEY for a funded X Layer account"],
+        "ready": False,
+        "primary_path": "OKX Agentic Wallet",
+        "missing": [
+            "verified OKX Agentic Wallet transaction-signing flow for anchoring a receipt commitment on X Layer"
+        ],
+        "fallback_private_key_present": raw_private_key_present,
         "signing_note": (
-            "No Python EVM signing dependency is installed in this workspace; a real anchor needs "
-            "either an approved OKX Agentic Wallet flow or a vetted signing dependency plus a funded key."
+            "The build spec makes OKX Agentic Wallet the primary path. A raw funded key is not treated as "
+            "completion unless the operator explicitly approves that fallback and the signing implementation "
+            "is separately verified."
         ),
     }
 
@@ -64,15 +69,12 @@ def anchor_commitment(commitment_hash: str) -> dict[str, Any]:
         return {
             "anchored": False,
             "commitment_hash": commitment_hash,
-            "reason": "missing X Layer mainnet signer prerequisite",
+            "reason": "missing verified OKX Agentic Wallet anchoring path",
             "prerequisites": prereq,
         }
     return {
         "anchored": False,
         "commitment_hash": commitment_hash,
-        "reason": (
-            "XLAYER_PRIVATE_KEY is present, but no vetted EVM signing implementation is installed. "
-            "Refusing to hand-roll transaction signing for mainnet funds."
-        ),
+        "reason": "OKX Agentic Wallet anchoring flow is not implemented yet",
         "prerequisites": prereq,
     }
