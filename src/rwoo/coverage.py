@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rwoo.parsers import parse_economics_market, parse_weather_market
+from rwoo.parsers import parse_economics_market, parse_sports_market, parse_weather_market
 
 
 @dataclass(frozen=True)
@@ -66,6 +66,14 @@ def classify_market_shape(market) -> MarketCoverage:
                 shape="national_team_winner",
                 status="engine_available",
                 reason="supported World Cup national-team outright shape",
+            )
+        parsed = parse_sports_market(market)
+        if parsed is not None:
+            return MarketCoverage(
+                family=parsed.family,
+                shape=parsed.shape,
+                status=parsed.status,
+                reason=parsed.reason,
             )
         return _sports_shape_from_text(text, venue=market.venue)
 

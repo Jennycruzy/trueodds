@@ -25,10 +25,30 @@ ELO_BASE = "https://www.eloratings.net"
 WORLD_TSV_URL = f"{ELO_BASE}/World.tsv"
 TEAM_NAMES_URL = f"{ELO_BASE}/en.teams.tsv"
 FIFA_RANKINGS_URL = "https://api.fifa.com/api/v3/rankings"
+FIFA_MATCHES_URL = "https://api.fifa.com/api/v3/calendar/matches"
+# Official FIFA API ids for the 2026 Men's World Cup, verified live
+# 2026-07-09 (GET /api/v3/seasons?idCompetition=17 lists season 285023 as
+# 'FIFA World Cup 2026™').
+WC_ID_COMPETITION = "17"
+WC_ID_SEASON = "285023"
 USER_AGENT = "Mozilla/5.0 rwoo-verifier/1.0"
 _TEAM_NAMES_CACHE: dict[str, str] | None = None
 _WORLD_ELO_CACHE: list[dict] | None = None
 _FIFA_RANKINGS_CACHE: list[dict] | None = None
+_WC_STATE_CACHE: dict | None = None
+
+# FIFA StageName -> the elimination-stage key markets settle on. The
+# third-place play-off is deliberately absent: its participants were already
+# eliminated in the semifinals, which is the stage such markets score.
+_FIFA_STAGE_KEYS = {
+    "First Stage": "group_stage",
+    "Round of 32": "round_of_32",
+    "Round of 16": "round_of_16",
+    "Quarter-final": "quarterfinals",
+    "Semi-final": "semifinals",
+    "Final": "runner_up",
+}
+STAGE_ORDER = ["group_stage", "round_of_32", "round_of_16", "quarterfinals", "semifinals", "runner_up", "champion"]
 
 
 def _get_with_retry(
@@ -136,6 +156,233 @@ def fetch_fifa_rankings(count: int = 211) -> list[dict]:
     return rankings
 
 
+def fetch_world_cup_state() -> dict:
+    """Live 2026 World Cup state from the official FIFA match calendar.
+
+    Returns {"matches": [...], "started": bool, "finished": bool}. Each match:
+    {number, stage_key, slot_a, slot_b, home, away, winner, loser, played}
+    where slot_a/slot_b are ('team', name) | ('W', n) | ('RU', n) built from
+    FIFA's own PlaceHolderA/B fields (verified live 2026-07-09: e.g. the
+    semifinal carries PlaceHolderA='W97')."""
+    global _WC_STATE_CACHE
+    if _WC_STATE_CACHE is not None:
+        return _WC_STATE_CACHE
+    data = _get_with_retry(
+        FIFA_MATCHES_URL,
+        params={
+            "idCompetition": WC_ID_COMPETITION,
+            "idSeason": WC_ID_SEASON,
+            "count": 500,
+            "language": "en",
+        },
+    ).json()
+    matches = []
+    for row in data.get("Results", []):
+        stage_name = (row.get("StageName") or [{}])[0].get("Description", "")
+        stage_key = _FIFA_STAGE_KEYS.get(stage_name)
+        if stage_name == "Play-off for third place":
+            continue  # not an elimination stage; see _FIFA_STAGE_KEYS note
+        if stage_key is None:
+            continue
+
+        def team_name(side: dict | None) -> str | None:
+            if not side or not side.get("TeamName"):
+                return None
+            return side["TeamName"][0].get("Description")
+
+        home_side, away_side = row.get("Home"), row.get("Away")
+        home, away = team_name(home_side), team_name(away_side)
+        played = row.get("MatchStatus") == 0 and row.get("Winner") is not None
+        winner = loser = None
+        if played and home and away:
+            winner_id = str(row.get("Winner"))
+            home_id = str((home_side or {}).get("IdTeam"))
+            winner, loser = (home, away) if winner_id == home_id else (away, home)
+
+        def slot(placeholder: str | None, team: str | None):
+            if team:
+                return ("team", _normal_name(team))
+            if placeholder and placeholder[0] == "W" and placeholder[1:].isdigit():
+                return ("W", int(placeholder[1:]))
+            if placeholder and placeholder.startswith("RU") and placeholder[2:].isdigit():
+                return ("RU", int(placeholder[2:]))
+            return None
+
+        matches.append(
+            {
+                "number": row.get("MatchNumber"),
+                "stage_key": stage_key,
+                "slot_a": slot(row.get("PlaceHolderA"), home),
+                "slot_b": slot(row.get("PlaceHolderB"), away),
+                "home": home,
+                "away": away,
+                "winner": _normal_name(winner) if winner else None,
+                "loser": _normal_name(loser) if loser else None,
+                "played": played,
+                "display_names": {_normal_name(n): n for n in (home, away) if n},
+            }
+        )
+    knockout = [m for m in matches if m["stage_key"] != "group_stage"]
+    final = next((m for m in matches if m["stage_key"] == "runner_up"), None)
+    state = {
+        "matches": matches,
+        "started": any(m["played"] for m in matches),
+        "knockout_underway": any(m["played"] for m in knockout),
+        "finished": bool(final and final["played"]),
+    }
+    _WC_STATE_CACHE = state
+    return state
+
+
+def _elo_win_probability(rating_a: float, rating_b: float) -> float:
+    return 1.0 / (1.0 + 10 ** (-(rating_a - rating_b) / 400.0))
+
+
+def solve_remaining_bracket(state: dict, ratings: dict[str, float]) -> dict[str, dict]:
+    """Exact elimination-stage distribution per team, conditioned on the real
+    played results. No sampling: with the actual bracket this is a small
+    exact enumeration via winner/loser distributions per match.
+
+    Returns {team_key: {'champion': p, 'exit': {stage_key: p}}}."""
+    knockout = sorted(
+        (m for m in state["matches"] if m["stage_key"] != "group_stage"),
+        key=lambda m: m["number"],
+    )
+    winner_dist: dict[int, dict[str, float]] = {}
+    loser_dist: dict[int, dict[str, float]] = {}
+    exit_probs: dict[str, dict[str, float]] = {}
+    champion: dict[str, float] = {}
+
+    def slot_distribution(slot) -> dict[str, float]:
+        kind, value = slot
+        if kind == "team":
+            return {value: 1.0}
+        if kind == "W":
+            return dict(winner_dist.get(value, {}))
+        return dict(loser_dist.get(value, {}))
+
+    for match in knockout:
+        if match["played"]:
+            w_dist = {match["winner"]: 1.0}
+            l_dist = {match["loser"]: 1.0}
+        else:
+            if match["slot_a"] is None or match["slot_b"] is None:
+                continue
+            dist_a = slot_distribution(match["slot_a"])
+            dist_b = slot_distribution(match["slot_b"])
+            w_dist, l_dist = {}, {}
+            for team_a, p_a in dist_a.items():
+                for team_b, p_b in dist_b.items():
+                    joint = p_a * p_b
+                    if joint <= 0:
+                        continue
+                    p_win = _elo_win_probability(
+                        ratings.get(team_a, min(ratings.values())),
+                        ratings.get(team_b, min(ratings.values())),
+                    )
+                    w_dist[team_a] = w_dist.get(team_a, 0.0) + joint * p_win
+                    w_dist[team_b] = w_dist.get(team_b, 0.0) + joint * (1 - p_win)
+                    l_dist[team_a] = l_dist.get(team_a, 0.0) + joint * (1 - p_win)
+                    l_dist[team_b] = l_dist.get(team_b, 0.0) + joint * p_win
+        winner_dist[match["number"]] = w_dist
+        loser_dist[match["number"]] = l_dist
+        for team, probability in l_dist.items():
+            exit_probs.setdefault(team, {})[match["stage_key"]] = (
+                exit_probs.get(team, {}).get(match["stage_key"], 0.0) + probability
+            )
+        if match["stage_key"] == "runner_up":
+            for team, probability in w_dist.items():
+                champion[team] = champion.get(team, 0.0) + probability
+
+    # Teams that appear in group-stage matches but never in a knockout slot
+    # were eliminated in the group stage — a settled fact, not a model call.
+    knockout_teams = set()
+    for m in knockout:
+        knockout_teams.update(m["display_names"])
+    for m in state["matches"]:
+        if m["stage_key"] != "group_stage":
+            continue
+        for key in m["display_names"]:
+            if key not in knockout_teams:
+                exit_probs.setdefault(key, {})["group_stage"] = 1.0
+
+    out: dict[str, dict] = {}
+    for team in set(exit_probs) | set(champion):
+        out[team] = {"champion": champion.get(team, 0.0), "exit": exit_probs.get(team, {})}
+    return out
+
+
+def _live_ratings_by_key() -> dict[str, float]:
+    aliases = {"usa": "united states", "united states of america": "united states"}
+    ratings = {}
+    for row in fetch_world_elo_ratings():
+        key = _normal_name(row["team"])
+        ratings[aliases.get(key, key)] = float(row["rating"])
+    return ratings
+
+
+def _in_tournament_result(country: str, want_stage: str) -> dict:
+    """Shared path for outright + stage markets once the knockout rounds are
+    underway: exact bracket solve on real state, live Elo ratings, and a
+    ±50-Elo sensitivity band on the target team as the uncertainty band."""
+    state = fetch_world_cup_state()
+    ratings = _live_ratings_by_key()
+    key = _normal_name(country)
+    key = {"usa": "united states"}.get(key, key)
+
+    def probability_with(rating_shift: float) -> float:
+        shifted = dict(ratings)
+        if key in shifted:
+            shifted[key] = shifted[key] + rating_shift
+        solved = solve_remaining_bracket(state, shifted)
+        team = solved.get(key)
+        if team is None:
+            return 0.0
+        if want_stage == "champion":
+            return team["champion"]
+        return team["exit"].get(want_stage, 0.0)
+
+    base = probability_with(0.0)
+    low_variant = probability_with(-50.0)
+    high_variant = probability_with(+50.0)
+    prob_low = min(base, low_variant, high_variant)
+    prob_high = max(base, low_variant, high_variant)
+    confidence = min(0.90, 1.0 - (prob_high - prob_low))
+    return {
+        "oracle_prob": base,
+        "confidence": confidence,
+        "prob_low": prob_low,
+        "prob_high": prob_high,
+        "per_model_prob": {
+            "elo_exact_bracket": base,
+            "elo_minus_50_sensitivity": low_variant,
+            "elo_plus_50_sensitivity": high_variant,
+        },
+        "per_source_values": {
+            "sources": [
+                "Official FIFA match calendar (competition 17 / season 285023): live played results and bracket",
+                "World Football Elo Ratings (live)",
+            ],
+            "country": country,
+            "target_stage": want_stage,
+            "matches_played": sum(1 for m in state["matches"] if m["played"]),
+            "settled_by_results": base in (0.0, 1.0),
+        },
+        "method": (
+            "exact enumeration of the remaining official bracket (played results are facts, not "
+            "forecasts) with Elo win probabilities; band from a ±50-point Elo sensitivity shift "
+            "on the target team"
+        ),
+        "data_freshness": datetime.now(timezone.utc).isoformat(),
+        "base_rate": base,
+        "refused": False,
+    }
+
+
+def _teams_in_slots(match: dict) -> set[str]:
+    return set(match["display_names"])
+
+
 def parse_world_cup_country(question: str) -> str:
     match = re.search(r"Will (.+?) win the 2026 FIFA World Cup\\?", question)
     if not match:
@@ -217,6 +464,63 @@ def _sim_team(row: dict) -> dict:
     return out
 
 
+_STAGE_TEXT_KEYS = {
+    "group stage": "group_stage",
+    "round of 32": "round_of_32",
+    "round of 16": "round_of_16",
+    "quarterfinals": "quarterfinals",
+    "quarter-finals": "quarterfinals",
+    "semifinals": "semifinals",
+    "semi-finals": "semifinals",
+    "final": "runner_up",  # 'eliminated in the Final' = runner-up
+    "runner-up": "runner_up",
+    "champion": "champion",
+    "outright winner": "champion",
+}
+
+
+def stage_key_from_text(text: str) -> str | None:
+    return _STAGE_TEXT_KEYS.get(text.strip().lower())
+
+
+def compute_world_cup_stage_probability(country: str, stage_key: str) -> dict:
+    """P(team's elimination stage is exactly `stage_key`), or P(champion).
+    Only defined once the knockout bracket exists; before the tournament the
+    honest answer is a refusal — group composition and draw are not wired
+    into the pre-tournament baselines."""
+    if stage_key not in STAGE_ORDER:
+        return {
+            "oracle_prob": None,
+            "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
+            "per_source_values": {"country": country, "stage": stage_key},
+            "method": "unknown_stage",
+            "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": None,
+            "refused": True,
+            "reason": f"unrecognized elimination stage {stage_key!r}",
+        }
+    state = fetch_world_cup_state()
+    if not state.get("knockout_underway"):
+        return {
+            "oracle_prob": None,
+            "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
+            "per_source_values": {"country": country, "stage": stage_key},
+            "method": "stage_market_needs_bracket_state",
+            "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": None,
+            "refused": True,
+            "reason": (
+                "stage-of-elimination pricing requires the real knockout bracket; the tournament "
+                "state source shows no knockout results yet"
+            ),
+        }
+    return _in_tournament_result(country, stage_key)
+
+
 def _find_target(country: str, ratings: list[dict], code: str | None = None) -> dict | None:
     wanted = _normal_name(country)
     aliases = {
@@ -236,6 +540,17 @@ def _find_target(country: str, ratings: list[dict], code: str | None = None) -> 
 
 def compute_world_cup_probability(question: str) -> dict:
     country = parse_world_cup_country(question)
+    # Once the tournament's knockout rounds are underway, ranking-only
+    # pre-tournament baselines answer the wrong question: real eliminations
+    # and the real bracket dominate. Verified live 2026-07-09 — the previous
+    # rankings-only path called an actionable edge against a team that was
+    # actually alive in the semifinal bracket.
+    try:
+        state = fetch_world_cup_state()
+    except Exception:  # noqa: BLE001
+        state = None
+    if state is not None and state.get("knockout_underway"):
+        return _in_tournament_result(country, "champion")
     ratings = fetch_world_elo_ratings()
     fifa_rankings = fetch_fifa_rankings()
     target = _find_target(country, ratings)

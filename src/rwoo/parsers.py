@@ -43,7 +43,66 @@ def parse_market(market) -> ParsedMarket | None:
         return parse_weather_market(market)
     if market.domain == "economics":
         return parse_economics_market(market)
+    if market.domain == "sports":
+        return parse_sports_market(market)
     return None
+
+
+_WC_ELIM_RE = re.compile(
+    r"^Will (.+?) get eliminated in the (.+?) of the 2026 (?:Men's )?FIFA World Cup", re.IGNORECASE
+)
+_WC_WIN_FINAL_RE = re.compile(
+    r"^Will (.+?) win the Final of the 2026 (?:Men's )?FIFA World Cup", re.IGNORECASE
+)
+_WC_LIMITLESS_STAGE_RE = re.compile(
+    r"^World Cup:\s*(.+?)\s+Stage of Elimination\s*-\s*(.+)$", re.IGNORECASE
+)
+
+
+def parse_sports_market(market) -> ParsedMarket | None:
+    """World Cup stage-of-elimination markets (Kalshi KXWCSTAGEOFELIM titles
+    and Limitless 'World Cup: <team> Stage of Elimination - <stage>' groups,
+    both verified live 2026-07-09)."""
+    from rwoo.engines.sports import stage_key_from_text  # local import to avoid a cycle at module load
+
+    question = market.question or ""
+    team = stage_text = None
+    match = _WC_ELIM_RE.match(question)
+    if match:
+        team, stage_text = match.group(1), match.group(2)
+    else:
+        match = _WC_WIN_FINAL_RE.match(question)
+        if match:
+            team, stage_text = match.group(1), "champion"
+        else:
+            match = _WC_LIMITLESS_STAGE_RE.match(question)
+            if match:
+                team, stage_text = match.group(1), match.group(2)
+    if team is None:
+        return None
+    stage_key = stage_key_from_text(stage_text)
+    if stage_key is None:
+        return ParsedMarket(
+            domain="sports",
+            family="sports.world_cup",
+            shape="stage_of_elimination",
+            status="parse_missing",
+            reason=f"World Cup stage market recognized, but stage text {stage_text!r} is not mapped",
+            location=team,
+            settlement_source=market.resolution_source,
+            raw={"question": question},
+        )
+    return ParsedMarket(
+        domain="sports",
+        family="sports.world_cup",
+        shape="stage_of_elimination",
+        status="engine_available",
+        reason="supported World Cup stage-of-elimination market with parsed team and stage",
+        location=team,
+        source_series=stage_key,
+        settlement_source=market.resolution_source,
+        raw={"question": question},
+    )
 
 
 def parse_weather_market(market) -> ParsedMarket:

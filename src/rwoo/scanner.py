@@ -17,7 +17,7 @@ from typing import Any
 from rwoo import edge, weather_stations
 from rwoo.coverage import classify_market_shape
 from rwoo.engines import economics, sports, weather
-from rwoo.parsers import parse_economics_market, parse_weather_market
+from rwoo.parsers import parse_economics_market, parse_sports_market, parse_weather_market
 from rwoo.readers import kalshi, limitless, polymarket
 
 # Every weather series with a verified station is swept completely; the
@@ -26,6 +26,7 @@ WEATHER_SERIES = sorted(weather_stations.SERIES)
 # Kalshi economics series with a wired engine (or an honest engine-side
 # refusal path, e.g. KXFED far-dated meetings).
 ECONOMICS_SERIES = ["KXCPICORE", "KXECONSTATCPI", "KXCPIYOY", "KXGDP", "KXU3", "KXPAYROLLS", "KXFED"]
+SPORTS_SERIES = ["KXWCSTAGEOFELIM"]
 KALSHI_ACTIVE_DEFAULT_LIMIT = 500
 POLYMARKET_DEFAULT_LIMIT = 500
 LIMITLESS_DEFAULT_LIMIT = 500
@@ -207,14 +208,22 @@ def evaluate_market(market) -> ScanRecord | None:
             engine_result = _economics_engine_result(parsed)
             if engine_result is None:
                 return None
-    elif market.venue == "polymarket" and market.domain == "sports":
-        if not market.question.endswith("win the 2026 FIFA World Cup?"):
+    elif market.domain == "sports":
+        parsed = parse_sports_market(market)
+        if (
+            parsed is not None
+            and parsed.status == "engine_available"
+            and parsed.shape == "stage_of_elimination"
+            and parsed.location
+            and parsed.source_series
+        ):
+            engine_result = sports.compute_world_cup_stage_probability(parsed.location, parsed.source_series)
+        elif market.venue == "polymarket" and market.question.endswith("win the 2026 FIFA World Cup?"):
+            engine_result = sports.compute_world_cup_probability(market.question)
+        elif market.venue == "limitless" and market.raw.get("limitless_supported_shape") == "world_cup_winner":
+            engine_result = sports.compute_world_cup_probability(market.question)
+        else:
             return None
-        engine_result = sports.compute_world_cup_probability(market.question)
-    elif market.venue == "limitless" and market.domain == "sports":
-        if market.raw.get("limitless_supported_shape") != "world_cup_winner":
-            return None
-        engine_result = sports.compute_world_cup_probability(market.question)
     else:
         return None
 
@@ -333,6 +342,9 @@ def scan_opportunities(
     )
     markets.extend(
         kalshi.fetch_canonical_markets_for_series_batch(ECONOMICS_SERIES, limit=max_economics_markets)
+    )
+    markets.extend(
+        kalshi.fetch_canonical_markets_for_series_batch(SPORTS_SERIES, limit=max_economics_markets)
     )
     markets.extend(polymarket.fetch_canonical_active_markets(max_markets=polymarket_limit))
     if include_limitless:
