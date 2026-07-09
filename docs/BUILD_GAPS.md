@@ -1,6 +1,85 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-09
+Last updated: 2026-07-09 (second session: engine-breadth expansion)
+
+## 2026-07-09 Engine-Breadth Session — done vs. remaining
+
+Done this session (each verified live before commit):
+
+- Weather: 40 Kalshi series (20 stations, daily high AND low) verified via
+  live settlement-source `issuedby` codes + NOAA GHCND registry coordinates;
+  engine now supports temperature_2m_min, precipitation_sum, snowfall_sum
+  metrics (precip/snow have a documented 0.65 confidence cap; no live
+  daily rain/snow markets existed to exercise them).
+- Limitless fees: official published taker buy-fee table wired as a
+  conservative upper bound in `edge.py`; priced Limitless records moved from
+  `fee_missing` to `wait`/actionable-eligible. Phase 8 gate updated to assert
+  the fee is QUANTIFIED (not the old fee-gap assertion).
+- Economics engines added (`engines/economics.py`, sources in
+  `economic_sources.py`): monthly headline CPI (BLS SA + Cleveland Fed MoM
+  nowcast), annual headline CPI upgraded with Cleveland Fed YoY nowcast
+  (history-only pricing had pointed the OPPOSITE way from the official
+  nowcast on live June-2026 markets), quarterly GDP (Atlanta Fed GDPNow
+  workbook; dollar-level rows filtered from the growth path), U-3 (FRED
+  UNRATE empirical change distribution + SPF PRUNEMP annual density),
+  payrolls (FRED PAYEMS, pandemic window excluded, history-only cap 0.50),
+  Fed rates (FRED DFEDTARU + FOMC calendar; prices ONLY when no scheduled
+  meeting remains before target, refuses otherwise — no futures source),
+  recession-quarter (SPF RECESS anxious index; engine exists but is NOT yet
+  routed by the scanner — no live market with a decline-in-quarter rule).
+  SPF PRGDP/PRUNEMP bins quoted verbatim from the official documentation PDF
+  (2024:Q2-era only).
+- Sports: World Cup pricing now conditions on LIVE official FIFA bracket
+  state (competition 17 / season 285023, verified live mid-tournament).
+  Exact enumeration of the remaining bracket with live Elo; eliminated teams
+  get deterministic 0/1. Stage-of-elimination engine + parsers for Kalshi
+  KXWCSTAGEOFELIM and Limitless stage groups. This FIXED a real defect: the
+  rankings-only model had called an actionable edge against France while
+  France was alive in the semifinal bracket.
+- Sports source assessment (recorded in coverage reasons): ATP 403,
+  Sackmann CSV 404, stats.nba.com timeout -> tennis/NBA are source_missing;
+  official NHL API verified reachable but offseason futures engine deferred
+  (cannot honestly clear the 0.55 confidence floor).
+- Ingestion: Kalshi reader has 429 backoff + throttled batch sweeps; every
+  wired series family is swept completely; defaults raised (Kalshi census
+  2000, Polymarket 2000, Limitless 1000). Full Kalshi universe measured at
+  >600k open markets dominated by parlay/multigame series — full per-market
+  enumeration is deliberately bounded, disclosed in the scan artifact's
+  `ingestion_boundary` field.
+
+Remaining (next session, in this order):
+
+1. Unit tests for `parsers.py` shapes (tests/ is still empty) — CPI
+   annual/monthly bins, GDP quarter bins, KXECONSTAT exact bins, Fed/U3/
+   payroll tickers, WC stage titles, weather series/station routing.
+2. Phase 9 coverage gate in `verify.py`: prove broad ingestion, per-record
+   family/shape/status fields, at least one priced record per new engine
+   family (weather low, CPI monthly, GDP, labor, WC stage), and honest
+   refusal paths (KXFED far meetings, tennis/NBA source_missing).
+3. Regenerate `data/public/opportunity_scan_latest.*` with a full scan and
+   commit; compare coverage_status_counts against the 2026-07-09 morning
+   artifact (parse_missing 328 / model_missing 298 should drop sharply).
+4. Update `docs/VERIFICATION_LEDGER.md` with this session's verified
+   sources: NOAA GHCND registry, NWS issuedby codes per series, Limitless
+   fee table + SDK effectiveFeeBps semantics, Cleveland YoY table, SPF
+   PRGDP/PRUNEMP/RECESS sheets + doc-PDF bins, FRED fredgraph CSVs
+   (DFEDTARU/UNRATE/PAYEMS), FOMC calendar page, GDPNow workbook
+   (TrackingHistory sheet), FIFA calendar/matches season 285023.
+5. Re-run `python3 verify.py --phase 5/7/8` end to end (phase 8's Limitless
+   fee check was rewritten; phases 5/7 should be unaffected but must be
+   proven, not assumed).
+6. Economics backtests for the new families (the calibration moat currently
+   covers core CPI + WC outrights only): headline CPI monthly/annual and
+   GDP need no-lookahead backtests before their confidence caps are raised.
+7. PPI engine: no open PPI markets existed on 2026-07-09 (KXUSPPI empty);
+   add the BLS `wp` flat-file/API reader when live markets return.
+8. Recession routing: wire `compute_recession_quarter_probability` into the
+   scanner when a live market's rule is a decline-in-quarter test (the
+   Polymarket 2026-recession market is NBER-shaped -> stays source_missing).
+9. Limitless daily weather markets: none live on 2026-07-09; when one
+   appears with station/date/strike, add the Limitless weather parser path.
+10. Non-US CPI (China/Korea/etc.): official sources (NBS/KOSIS) not wired;
+    stays source_missing.
 
 This file records incomplete work that must not be forgotten between phases.
 It is intentionally blunt: if a component is not complete, it stays listed
