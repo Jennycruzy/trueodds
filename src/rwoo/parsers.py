@@ -84,20 +84,25 @@ def parse_weather_market(market) -> ParsedMarket:
 
 
 def parse_economics_market(market) -> ParsedMarket | None:
+    if market.venue == "kalshi":
+        parsed = _parse_kalshi_economics_market(market)
+        if parsed is not None:
+            return parsed
+
     text = " ".join(part for part in (market.question, market.resolution_rule) if part)
-    parsed = _parse_headline_inflation_annual(text)
+    parsed = _parse_headline_inflation_bins(text)
     if parsed is not None:
-        country, month, strike_type, floor_strike, cap_strike = parsed
+        country, month, cadence, strike_type, floor_strike, cap_strike = parsed
         status = "engine_available" if country == "US" else "source_missing"
         reason = (
-            "supported US headline-CPI annual inflation market parsed into month/country/rounded bin"
+            f"supported US headline-CPI {cadence} inflation market parsed into month/country/rounded bin"
             if status == "engine_available"
             else f"{country} headline-CPI market is parsed, but that country's official CPI source is not wired yet"
         )
         return ParsedMarket(
             domain="economics",
             family="economics.headline_cpi",
-            shape="annual_yoy_bin_or_threshold",
+            shape="annual_yoy_bin_or_threshold" if cadence == "annual" else "monthly_bin_or_threshold",
             status=status,
             reason=reason,
             country=country,
@@ -108,7 +113,224 @@ def parse_economics_market(market) -> ParsedMarket | None:
             settlement_source=market.resolution_source,
             raw={"question": market.question, "resolution_rule": market.resolution_rule},
         )
+    parsed = _parse_gdp_quarterly(text)
+    if parsed is not None:
+        quarter_label, strike_type, floor_strike, cap_strike = parsed
+        return ParsedMarket(
+            domain="economics",
+            family="economics.gdp",
+            shape="quarterly_growth_bin_or_threshold",
+            status="engine_available",
+            reason="supported US quarterly real-GDP market parsed into quarter and growth bin",
+            country="US",
+            target_year=int(quarter_label[:4]),
+            strike_type=strike_type,
+            floor_strike=floor_strike,
+            cap_strike=cap_strike,
+            settlement_source=market.resolution_source,
+            source_series=quarter_label,
+            raw={"question": market.question, "resolution_rule": market.resolution_rule},
+        )
+    if _is_fed_path_market(text):
+        return ParsedMarket(
+            domain="economics",
+            family="economics.fed_rates",
+            shape="rate_decision_or_path",
+            status="source_missing",
+            reason=(
+                "Fed rate-path market is parsed, but pricing decisions at scheduled FOMC meetings "
+                "needs a verified forward-looking rate-path distribution source (e.g. fed funds "
+                "futures), which is not wired"
+            ),
+            settlement_source=market.resolution_source,
+            raw={"question": market.question, "resolution_rule": market.resolution_rule},
+        )
     return None
+
+
+_KALSHI_ECON_SERIES = {
+    "KXCPIYOY": ("economics.headline_cpi", "annual_yoy_bin_or_threshold"),
+    "KXECONSTATCPI": ("economics.headline_cpi", "monthly_bin_or_threshold"),
+    "KXGDP": ("economics.gdp", "quarterly_growth_bin_or_threshold"),
+    "KXU3": ("economics.labor", "unemployment_rate_threshold"),
+    "KXPAYROLLS": ("economics.labor", "payrolls_change_threshold"),
+    "KXFED": ("economics.fed_rates", "target_range_after_meeting"),
+}
+
+
+def _parse_kalshi_economics_market(market) -> ParsedMarket | None:
+    """Kalshi economics series with structured strike fields. Shapes verified
+    live 2026-07-09 against open markets in each series."""
+    raw_market = market.raw.get("market", {}) if isinstance(market.raw, dict) else {}
+    event_ticker = raw_market.get("event_ticker") or ""
+    series_ticker = raw_market.get("series_ticker") or event_ticker.split("-", 1)[0]
+    if series_ticker not in _KALSHI_ECON_SERIES:
+        return None
+    family, shape = _KALSHI_ECON_SERIES[series_ticker]
+
+    month, year = _kalshi_event_month_year(event_ticker)
+    strike_type = raw_market.get("strike_type")
+    floor_strike = _float_or_none(raw_market.get("floor_strike"))
+    cap_strike = _float_or_none(raw_market.get("cap_strike"))
+
+    if series_ticker == "KXECONSTATCPI":
+        # strike_type is 'custom': the rule is 'CPI month-over-month is
+        # exactly X%' with X encoded in the ticker suffix (e.g. T-0.3).
+        exact = _exact_value_from_ticker(raw_market.get("ticker") or "")
+        if exact is None:
+            return _econ_parse_missing(market, family, shape, "could not parse the exact MoM value from the ticker")
+        strike_type, floor_strike, cap_strike = "between", exact - 0.05, exact + 0.05
+    elif series_ticker == "KXGDP":
+        quarter_label = _quarter_from_text(market.question) or _quarter_from_text(market.resolution_rule or "")
+        if quarter_label is None or not strike_type:
+            return _econ_parse_missing(market, family, shape, "could not parse the target quarter or strike fields")
+        return ParsedMarket(
+            domain="economics",
+            family=family,
+            shape=shape,
+            status="engine_available",
+            reason="supported Kalshi quarterly real-GDP market with structured strike fields",
+            country="US",
+            target_year=int(quarter_label[:4]),
+            strike_type=str(strike_type),
+            floor_strike=floor_strike,
+            cap_strike=cap_strike,
+            settlement_source=market.resolution_source,
+            source_series=quarter_label,
+            raw={"market": raw_market},
+        )
+    elif series_ticker == "KXFED":
+        # Event ticker suffix names the meeting month, e.g. KXFED-27APR.
+        if month is None or year is None or not strike_type:
+            return _econ_parse_missing(market, family, shape, "could not parse the meeting month or strike fields")
+        meeting_anchor = f"{year:04d}-{month:02d}-28"  # end-of-meeting-month anchor; engine uses the calendar
+        return ParsedMarket(
+            domain="economics",
+            family=family,
+            shape=shape,
+            status="engine_available",
+            reason=(
+                "Kalshi fed-funds target market parsed; the engine prices it only when no scheduled "
+                "FOMC meeting remains before the target and refuses otherwise"
+            ),
+            country="US",
+            target_month=month,
+            target_year=year,
+            target_date=meeting_anchor,
+            strike_type=str(strike_type),
+            floor_strike=floor_strike,
+            cap_strike=cap_strike,
+            settlement_source=market.resolution_source,
+            raw={"market": raw_market},
+        )
+    if not strike_type or month is None:
+        return _econ_parse_missing(market, family, shape, "missing structured strike fields or target month")
+
+    return ParsedMarket(
+        domain="economics",
+        family=family,
+        shape=shape,
+        status="engine_available",
+        reason=f"supported Kalshi {family} market with structured strike fields",
+        country="US",
+        target_month=month,
+        target_year=year,
+        strike_type=str(strike_type),
+        floor_strike=floor_strike,
+        cap_strike=cap_strike,
+        settlement_source=market.resolution_source,
+        source_series=series_ticker,
+        raw={"market": raw_market},
+    )
+
+
+def _econ_parse_missing(market, family: str, shape: str, why: str) -> ParsedMarket:
+    return ParsedMarket(
+        domain="economics",
+        family=family,
+        shape=shape,
+        status="parse_missing",
+        reason=f"Kalshi economics market recognized, but {why}",
+        settlement_source=market.resolution_source,
+        raw={"question": market.question},
+    )
+
+
+_MONTH_ABBRS = {
+    "JAN": 1, "FEB": 2, "MAR": 3, "APR": 4, "MAY": 5, "JUN": 6,
+    "JUL": 7, "AUG": 8, "SEP": 9, "OCT": 10, "NOV": 11, "DEC": 12,
+}
+
+
+def _kalshi_event_month_year(event_ticker: str) -> tuple[int | None, int | None]:
+    suffix = event_ticker.rsplit("-", 1)[-1]
+    match = re.match(r"^(\d{2})([A-Z]{3})", suffix)
+    if not match:
+        return None, None
+    year_2, month_abbr = match.groups()
+    month = _MONTH_ABBRS.get(month_abbr)
+    return month, (2000 + int(year_2)) if month else None
+
+
+def _exact_value_from_ticker(ticker: str) -> float | None:
+    match = re.search(r"-T(-?\d+(?:\.\d+)?)$", ticker)
+    return float(match.group(1)) if match else None
+
+
+def _quarter_from_text(text: str) -> str | None:
+    match = re.search(r"\bQ([1-4])\s+(\d{4})\b", text)
+    if match:
+        return f"{match.group(2)}Q{match.group(1)}"
+    match = re.search(r"\b(\d{4})\s*Q([1-4])\b", text)
+    if match:
+        return f"{match.group(1)}Q{match.group(2)}"
+    return None
+
+
+def _parse_gdp_quarterly(text: str) -> tuple[str, str, float | None, float | None] | None:
+    """Limitless-style 'US GDP growth in Q2 2026? - >=3.5%' / '3.0-3.5%'."""
+    if not re.search(r"\bGDP growth\b", text, flags=re.IGNORECASE):
+        return None
+    quarter_label = _quarter_from_text(text)
+    if quarter_label is None:
+        return None
+    bin_match = re.search(r"-\s*([^-].*?%)\s*$", text)
+    if not bin_match:
+        return None
+    strike = _parse_percent_range(bin_match.group(1))
+    if strike is None:
+        return None
+    return (quarter_label, *strike)
+
+
+def _parse_percent_range(value: str) -> tuple[str, float | None, float | None] | None:
+    normalized = (
+        value.strip()
+        .replace("≤", "<=")
+        .replace("≥", ">=")
+        .replace("–", "-")
+        .replace("—", "-")
+        .replace("%", "")
+    )
+    range_match = re.match(r"^([-+]?\d+(?:\.\d+)?)\s*-\s*([-+]?\d+(?:\.\d+)?)$", normalized)
+    if range_match:
+        return "between", float(range_match.group(1)), float(range_match.group(2))
+    lower_match = re.match(r"^(?:<=|<)\s*([-+]?\d+(?:\.\d+)?)$", normalized)
+    if lower_match:
+        return "less", None, float(lower_match.group(1))
+    upper_match = re.match(r"^(?:>=|>)\s*([-+]?\d+(?:\.\d+)?)$", normalized)
+    if upper_match:
+        return "greater", float(upper_match.group(1)), None
+    return None
+
+
+def _is_fed_path_market(text: str) -> bool:
+    lowered = text.lower()
+    return bool(
+        re.search(r"\bfed (?:rate )?(?:cut|hike|decision)\b", lowered)
+        or re.search(r"\bfomc\b", lowered)
+        or re.search(r"\brate cuts? happen\b", lowered)
+    )
 
 
 def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMarket | None:
@@ -277,17 +499,20 @@ _MONTHS = {
 }
 
 
-def _parse_headline_inflation_annual(text: str) -> tuple[str, int, str, float | None, float | None] | None:
+def _parse_headline_inflation_bins(
+    text: str,
+) -> tuple[str, int, str, str, float | None, float | None] | None:
+    """Limitless-style '<Month> Inflation <Country> - <Annual|Monthly> - <bin>'."""
     match = re.search(
         r"\b("
         + "|".join(_MONTHS)
-        + r")\s+inflation\s+([A-Za-z .]+?)\s*-\s*annual\s*-\s*(.+?)(?:\s|$)",
+        + r")\s+inflation\s+([A-Za-z .]+?)\s*-\s*(annual|monthly)\s*-\s*(.+?)(?:\s|$)",
         text,
         flags=re.IGNORECASE,
     )
     if not match:
         return None
-    month_name, country_text, bin_text = match.groups()
+    month_name, country_text, cadence, bin_text = match.groups()
     country = _normal_country(country_text)
     if not country:
         return None
@@ -295,7 +520,7 @@ def _parse_headline_inflation_annual(text: str) -> tuple[str, int, str, float | 
     if strike is None:
         return None
     strike_type, floor_strike, cap_strike = strike
-    return country, _MONTHS[month_name.lower()], strike_type, floor_strike, cap_strike
+    return country, _MONTHS[month_name.lower()], cadence.lower(), strike_type, floor_strike, cap_strike
 
 
 def _normal_country(value: str) -> str | None:

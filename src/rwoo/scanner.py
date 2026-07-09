@@ -23,7 +23,9 @@ from rwoo.readers import kalshi, limitless, polymarket
 # Every weather series with a verified station is swept completely; the
 # registry in weather_stations.py is the single source of truth.
 WEATHER_SERIES = sorted(weather_stations.SERIES)
-ECONOMICS_SERIES = ["KXCPICORE"]
+# Kalshi economics series with a wired engine (or an honest engine-side
+# refusal path, e.g. KXFED far-dated meetings).
+ECONOMICS_SERIES = ["KXCPICORE", "KXECONSTATCPI", "KXCPIYOY", "KXGDP", "KXU3", "KXPAYROLLS", "KXFED"]
 KALSHI_ACTIVE_DEFAULT_LIMIT = 500
 POLYMARKET_DEFAULT_LIMIT = 500
 LIMITLESS_DEFAULT_LIMIT = 500
@@ -189,35 +191,22 @@ def evaluate_market(market) -> ScanRecord | None:
             include_base_rate=False,
             metric=parsed.metric,
         )
-    elif market.venue == "kalshi" and market.domain == "economics":
+    elif market.domain == "economics":
         event_ticker = raw_market.get("event_ticker", "")
-        if not event_ticker.startswith("KXCPICORE-") or not raw_market.get("strike_type"):
-            parsed = parse_economics_market(market)
-            if parsed is None or parsed.status != "engine_available" or parsed.family != "economics.headline_cpi":
-                return None
-            engine_result = economics.compute_headline_cpi_annual_probability(
-                strike_type=parsed.strike_type,
-                floor_strike=parsed.floor_strike,
-                cap_strike=parsed.cap_strike,
-                target_month=parsed.target_month,
-            )
-        else:
+        if market.venue == "kalshi" and event_ticker.startswith("KXCPICORE-") and raw_market.get("strike_type"):
             engine_result = economics.compute_core_cpi_probability(
                 strike_type=raw_market["strike_type"],
                 floor_strike=raw_market.get("floor_strike"),
                 cap_strike=raw_market.get("cap_strike"),
                 target_month=_month_from_event_ticker(event_ticker),
             )
-    elif market.domain == "economics":
-        parsed = parse_economics_market(market)
-        if parsed is None or parsed.status != "engine_available" or parsed.family != "economics.headline_cpi":
-            return None
-        engine_result = economics.compute_headline_cpi_annual_probability(
-            strike_type=parsed.strike_type,
-            floor_strike=parsed.floor_strike,
-            cap_strike=parsed.cap_strike,
-            target_month=parsed.target_month,
-        )
+        else:
+            parsed = parse_economics_market(market)
+            if parsed is None or parsed.status != "engine_available":
+                return None
+            engine_result = _economics_engine_result(parsed)
+            if engine_result is None:
+                return None
     elif market.venue == "polymarket" and market.domain == "sports":
         if not market.question.endswith("win the 2026 FIFA World Cup?"):
             return None
@@ -235,6 +224,56 @@ def evaluate_market(market) -> ScanRecord | None:
         fee_multiplier=_market_fee_multiplier(market) if market.venue == "kalshi" else 1,
     )
     return _record_from_result(market, engine_result, qualified_edge)
+
+
+def _economics_engine_result(parsed) -> dict | None:
+    """Route a parsed economics market to its family engine."""
+    if parsed.family == "economics.headline_cpi":
+        if parsed.shape == "monthly_bin_or_threshold":
+            return economics.compute_headline_cpi_monthly_probability(
+                strike_type=parsed.strike_type,
+                floor_strike=parsed.floor_strike,
+                cap_strike=parsed.cap_strike,
+                target_month=parsed.target_month,
+            )
+        return economics.compute_headline_cpi_annual_probability(
+            strike_type=parsed.strike_type,
+            floor_strike=parsed.floor_strike,
+            cap_strike=parsed.cap_strike,
+            target_month=parsed.target_month,
+        )
+    if parsed.family == "economics.gdp" and parsed.source_series:
+        return economics.compute_gdp_quarterly_probability(
+            strike_type=parsed.strike_type,
+            floor_strike=parsed.floor_strike,
+            cap_strike=parsed.cap_strike,
+            quarter_label=parsed.source_series,
+        )
+    if parsed.family == "economics.labor":
+        if parsed.shape == "unemployment_rate_threshold" and parsed.target_month and parsed.target_year:
+            return economics.compute_unemployment_probability(
+                strike_type=parsed.strike_type,
+                floor_strike=parsed.floor_strike,
+                cap_strike=parsed.cap_strike,
+                target_month=parsed.target_month,
+                target_year=parsed.target_year,
+            )
+        if parsed.shape == "payrolls_change_threshold":
+            return economics.compute_payrolls_probability(
+                strike_type=parsed.strike_type,
+                floor_strike=parsed.floor_strike,
+                cap_strike=parsed.cap_strike,
+                target_month=parsed.target_month,
+            )
+        return None
+    if parsed.family == "economics.fed_rates" and parsed.target_date:
+        return economics.compute_fed_rate_probability(
+            strike_type=parsed.strike_type,
+            floor_strike=parsed.floor_strike,
+            cap_strike=parsed.cap_strike,
+            target_date_iso=parsed.target_date,
+        )
+    return None
 
 
 def skip_reason(market) -> str:
