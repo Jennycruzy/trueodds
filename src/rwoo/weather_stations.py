@@ -61,6 +61,14 @@ STATIONS: dict[str, Station] = {
     ),
 }
 
+WEATHER_TIMEZONES = {
+    "KXHIGHNY": "America/New_York",
+    "KXHIGHCHI": "America/Chicago",
+    "KXHIGHLAX": "America/Los_Angeles",
+    "KXHIGHMIA": "America/New_York",
+    "KXHIGHDEN": "America/Denver",
+}
+
 
 def station_for_series(series_ticker: str) -> Station:
     if series_ticker not in STATIONS:

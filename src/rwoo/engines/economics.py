@@ -33,6 +33,7 @@ BLS_FLAT_CURRENT_URL = "https://download.bls.gov/pub/time.series/cu/cu.data.0.Cu
 # behaves exactly as before (unauthenticated, lower quota).
 BLS_API_KEY_ENV = "BLS_API_KEY"
 BLS_CORE_CPI_SA_SERIES = "CUSR0000SA0L1E"
+BLS_HEADLINE_CPI_NSA_SERIES = "CUUR0000SA0"
 HISTORY_START_YEAR = 2016
 
 # The unauthenticated BLS v2 API allows only ~25 requests/day. A backtest
@@ -40,7 +41,7 @@ HISTORY_START_YEAR = 2016
 # share the same decision date and therefore the same `as_of` cutoff — without
 # caching, each one re-fetches the entire history separately and burns the
 # daily quota in a handful of markets. Keyed on the exact query shape.
-_CPI_SERIES_CACHE: dict[tuple[int, int], list[dict]] = {}
+_CPI_SERIES_CACHE: dict[tuple[str, int, int], list[dict]] = {}
 
 # Real BLS CPI release dates (release covers the PRIOR month's data). The
 # primary BLS release schedule page is verified by `verify.py --phase 7` using
@@ -96,9 +97,9 @@ def _post_with_retry(url: str, json: dict, timeout: float = 25, attempts: int = 
     raise last_exc
 
 
-def _fetch_core_cpi_chunk(start_year: int, end_year: int) -> list[dict]:
+def _fetch_cpi_chunk(series_id: str, start_year: int, end_year: int) -> list[dict]:
     payload = {
-        "seriesid": [BLS_CORE_CPI_SA_SERIES],
+        "seriesid": [series_id],
         "startyear": str(start_year),
         "endyear": str(end_year),
     }
@@ -112,7 +113,11 @@ def _fetch_core_cpi_chunk(start_year: int, end_year: int) -> list[dict]:
     return data["Results"]["series"][0]["data"]
 
 
-def _fetch_core_cpi_flat_file(start_year: int, end_year: int) -> list[dict]:
+def _fetch_core_cpi_chunk(start_year: int, end_year: int) -> list[dict]:
+    return _fetch_cpi_chunk(BLS_CORE_CPI_SA_SERIES, start_year, end_year)
+
+
+def _fetch_cpi_flat_file(series_id: str, start_year: int, end_year: int) -> list[dict]:
     """Official BLS flat-file fallback.
 
     The public API has a low unauthenticated daily quota. The BLS time-series
@@ -129,7 +134,7 @@ def _fetch_core_cpi_flat_file(start_year: int, end_year: int) -> list[dict]:
     rows = []
     for line in resp.text.splitlines()[1:]:
         parts = line.split()
-        if len(parts) < 4 or parts[0] != BLS_CORE_CPI_SA_SERIES:
+        if len(parts) < 4 or parts[0] != series_id:
             continue
         year = int(parts[1])
         if not start_year <= year <= end_year:
@@ -143,17 +148,25 @@ def _fetch_core_cpi_flat_file(start_year: int, end_year: int) -> list[dict]:
             }
         )
     if not rows:
-        raise RuntimeError("BLS flat-file fallback returned no core-CPI rows")
+        raise RuntimeError(f"BLS flat-file fallback returned no CPI rows for {series_id}")
     return rows
 
 
-def _fetch_and_parse_full_history(start_year: int, end_year: int) -> list[dict]:
+def _fetch_core_cpi_flat_file(start_year: int, end_year: int) -> list[dict]:
+    return _fetch_cpi_flat_file(BLS_CORE_CPI_SA_SERIES, start_year, end_year)
+
+
+def _fetch_and_parse_full_history(
+    start_year: int,
+    end_year: int,
+    series_id: str = BLS_CORE_CPI_SA_SERIES,
+) -> list[dict]:
     """The full raw parsed history for [start_year, end_year], fetched once
     and cached — regardless of how many different `as_of` cutoffs later slice
     it. This is what keeps a many-market backtest inside BLS's real
     unauthenticated daily quota (~25 requests/day): one raw fetch serves every
     market's as-of filter instead of each market re-fetching the same years."""
-    cache_key = (start_year, end_year)
+    cache_key = (series_id, start_year, end_year)
     if cache_key in _CPI_SERIES_CACHE:
         return _CPI_SERIES_CACHE[cache_key]
 
@@ -162,10 +175,10 @@ def _fetch_and_parse_full_history(start_year: int, end_year: int) -> list[dict]:
     try:
         while chunk_start <= end_year:
             chunk_end = min(chunk_start + 9, end_year)
-            rows.extend(_fetch_core_cpi_chunk(chunk_start, chunk_end))
+            rows.extend(_fetch_cpi_chunk(series_id, chunk_start, chunk_end))
             chunk_start = chunk_end + 1
     except Exception:
-        rows = _fetch_core_cpi_flat_file(start_year, end_year)
+        rows = _fetch_cpi_flat_file(series_id, start_year, end_year)
 
     parsed = []
     seen = set()
@@ -205,7 +218,29 @@ def fetch_core_cpi_series(
     value actually became public, not merely which month it describes.
     """
     end_year = end_year or datetime.now(timezone.utc).year
-    full_history = _fetch_and_parse_full_history(start_year, end_year)
+    full_history = _fetch_and_parse_full_history(start_year, end_year, BLS_CORE_CPI_SA_SERIES)
+    if as_of is None:
+        return full_history
+    out = []
+    for row in full_history:
+        rd = release_date_for(row["year"], row["month"])
+        if rd is None or rd > as_of:
+            continue
+        out.append(row)
+    return out
+
+
+def fetch_headline_cpi_series(
+    start_year: int = HISTORY_START_YEAR, end_year: int | None = None, as_of: date | None = None
+) -> list[dict]:
+    """Official BLS all-items CPI-U values, oldest first.
+
+    This uses the not-seasonally-adjusted all-items CPI-U series because
+    public annual headline CPI markets typically resolve against the reported
+    12-month all-items figure before seasonal adjustment.
+    """
+    end_year = end_year or datetime.now(timezone.utc).year
+    full_history = _fetch_and_parse_full_history(start_year, end_year, BLS_HEADLINE_CPI_NSA_SERIES)
     if as_of is None:
         return full_history
     out = []
@@ -223,6 +258,19 @@ def month_over_month_changes(rows: list[dict]) -> list[dict]:
         pct = (cur["value"] - prev["value"]) / prev["value"] * 100
         reported_single_decimal = round(pct, 1)
         changes.append({**cur, "mom_pct": pct, "reported_single_decimal": reported_single_decimal})
+    return changes
+
+
+def year_over_year_changes(rows: list[dict]) -> list[dict]:
+    values = {(row["year"], row["month"]): row["value"] for row in rows}
+    changes = []
+    for row in rows:
+        prev = values.get((row["year"] - 1, row["month"]))
+        if prev in (None, 0):
+            continue
+        pct = (row["value"] - prev) / prev * 100
+        reported_single_decimal = round(pct, 1)
+        changes.append({**row, "yoy_pct": pct, "reported_single_decimal": reported_single_decimal})
     return changes
 
 
@@ -371,6 +419,89 @@ def compute_core_cpi_probability(
         "method": (
             "official BLS seasonally adjusted core CPI history plus official forward-looking "
             "Cleveland Fed nowcast/SPF density when available -> deterministic ensemble probability"
+        ),
+        "data_freshness": datetime.now(timezone.utc).isoformat(),
+        "base_rate": historical_prob,
+        "refused": False,
+    }
+
+
+def compute_headline_cpi_annual_probability(
+    strike_type: str,
+    floor_strike,
+    cap_strike,
+    target_month: int | None = None,
+    as_of: date | None = None,
+) -> dict:
+    rows = fetch_headline_cpi_series(as_of=as_of)
+    changes = year_over_year_changes(rows)
+    if len(changes) < 60:
+        return {
+            "oracle_prob": None,
+            "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
+            "per_source_values": {"official_bls_rows": len(rows), "usable_annual_changes": len(changes)},
+            "method": "insufficient_bls_headline_cpi_history",
+            "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": None,
+            "refused": True,
+            "reason": f"only {len(changes)} usable BLS annual headline-CPI changes returned",
+        }
+
+    all_values = [c["reported_single_decimal"] for c in changes]
+    trailing = [c["reported_single_decimal"] for c in changes[-36:]]
+    same_month = [
+        c["reported_single_decimal"] for c in changes if target_month is not None and c["month"] == target_month
+    ]
+
+    historical_prob = _event_probability(all_values, strike_type, floor_strike, cap_strike)
+    trailing_prob = _event_probability(trailing, strike_type, floor_strike, cap_strike)
+    model_probs = {
+        "official_bls_all_history_empirical": historical_prob,
+        "official_bls_trailing_36_months_empirical": trailing_prob,
+    }
+    if len(same_month) >= 5:
+        model_probs["official_bls_same_calendar_month_empirical"] = _event_probability(
+            same_month, strike_type, floor_strike, cap_strike
+        )
+
+    if len(trailing) >= 12:
+        trailing_mean = statistics.fmean(trailing)
+        trailing_std = statistics.pstdev(trailing)
+        model_probs["official_bls_trailing_normal_fit"] = _normal_event_probability(
+            trailing_mean,
+            trailing_std,
+            strike_type,
+            floor_strike,
+            cap_strike,
+        )
+
+    oracle_prob = statistics.fmean(model_probs.values())
+    prob_low = min(model_probs.values())
+    prob_high = max(model_probs.values())
+    confidence = min(0.50, max(0.0, 1.0 - (prob_high - prob_low)))
+    latest = rows[-1]
+
+    return {
+        "oracle_prob": oracle_prob,
+        "confidence": confidence,
+        "prob_low": prob_low,
+        "prob_high": prob_high,
+        "per_model_prob": model_probs,
+        "per_source_values": {
+            "source": "BLS public API",
+            "series": BLS_HEADLINE_CPI_NSA_SERIES,
+            "latest_observation": f"{latest['year']}-{latest['month']:02d}",
+            "latest_index_value": latest["value"],
+            "usable_annual_changes": len(changes),
+            "same_month_samples": len(same_month),
+            "recent_reported_single_decimal_values": all_values[-8:],
+        },
+        "method": (
+            "official BLS not-seasonally-adjusted all-items CPI-U annual changes -> "
+            "deterministic empirical/normal-fit probability; confidence capped until "
+            "a verified forward-looking headline-CPI distribution is added"
         ),
         "data_freshness": datetime.now(timezone.utc).isoformat(),
         "base_rate": historical_prob,

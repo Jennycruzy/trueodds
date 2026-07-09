@@ -17,21 +17,14 @@ from typing import Any
 from rwoo import edge
 from rwoo.coverage import classify_market_shape
 from rwoo.engines import economics, sports, weather
+from rwoo.parsers import parse_economics_market, parse_weather_market
 from rwoo.readers import kalshi, limitless, polymarket
-from rwoo.weather_stations import STATIONS, station_for_series
 
 WEATHER_SERIES = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA", "KXHIGHDEN"]
 ECONOMICS_SERIES = ["KXCPICORE"]
 KALSHI_ACTIVE_DEFAULT_LIMIT = 500
 POLYMARKET_DEFAULT_LIMIT = 500
 LIMITLESS_DEFAULT_LIMIT = 500
-WEATHER_TIMEZONES = {
-    "KXHIGHNY": "America/New_York",
-    "KXHIGHCHI": "America/Chicago",
-    "KXHIGHLAX": "America/Los_Angeles",
-    "KXHIGHMIA": "America/New_York",
-    "KXHIGHDEN": "America/Denver",
-}
 
 
 @dataclass
@@ -175,32 +168,52 @@ def evaluate_market(market) -> ScanRecord | None:
     raw_market = market.raw.get("market", {})
     engine_result: dict[str, Any] | None = None
 
-    if market.venue == "kalshi" and market.domain == "weather":
-        event_ticker = raw_market.get("event_ticker")
-        series_ticker = (event_ticker or "").split("-", 1)[0]
-        if not event_ticker or series_ticker not in STATIONS or not raw_market.get("strike_type"):
+    if market.domain == "weather":
+        parsed = parse_weather_market(market)
+        if parsed.status != "engine_available" or parsed.metric != "temperature_2m_max":
             return None
-        station = station_for_series(series_ticker)
-        target_date = kalshi.parse_event_date(event_ticker)
+        lat = parsed.raw.get("lat")
+        lon = parsed.raw.get("lon")
+        if lat is None or lon is None or not parsed.target_date or not parsed.strike_type:
+            return None
         engine_result = weather.compute_weather_probability(
-            lat=station.lat,
-            lon=station.lon,
-            target_date=target_date,
-            timezone_name=WEATHER_TIMEZONES.get(series_ticker, "UTC"),
-            strike_type=raw_market["strike_type"],
-            floor_strike=raw_market.get("floor_strike"),
-            cap_strike=raw_market.get("cap_strike"),
+            lat=lat,
+            lon=lon,
+            target_date=parsed.target_date,
+            timezone_name=parsed.timezone_name or "UTC",
+            strike_type=parsed.strike_type,
+            floor_strike=parsed.floor_strike,
+            cap_strike=parsed.cap_strike,
             include_base_rate=False,
         )
     elif market.venue == "kalshi" and market.domain == "economics":
         event_ticker = raw_market.get("event_ticker", "")
         if not event_ticker.startswith("KXCPICORE-") or not raw_market.get("strike_type"):
+            parsed = parse_economics_market(market)
+            if parsed is None or parsed.status != "engine_available" or parsed.family != "economics.headline_cpi":
+                return None
+            engine_result = economics.compute_headline_cpi_annual_probability(
+                strike_type=parsed.strike_type,
+                floor_strike=parsed.floor_strike,
+                cap_strike=parsed.cap_strike,
+                target_month=parsed.target_month,
+            )
+        else:
+            engine_result = economics.compute_core_cpi_probability(
+                strike_type=raw_market["strike_type"],
+                floor_strike=raw_market.get("floor_strike"),
+                cap_strike=raw_market.get("cap_strike"),
+                target_month=_month_from_event_ticker(event_ticker),
+            )
+    elif market.domain == "economics":
+        parsed = parse_economics_market(market)
+        if parsed is None or parsed.status != "engine_available" or parsed.family != "economics.headline_cpi":
             return None
-        engine_result = economics.compute_core_cpi_probability(
-            strike_type=raw_market["strike_type"],
-            floor_strike=raw_market.get("floor_strike"),
-            cap_strike=raw_market.get("cap_strike"),
-            target_month=_month_from_event_ticker(event_ticker),
+        engine_result = economics.compute_headline_cpi_annual_probability(
+            strike_type=parsed.strike_type,
+            floor_strike=parsed.floor_strike,
+            cap_strike=parsed.cap_strike,
+            target_month=parsed.target_month,
         )
     elif market.venue == "polymarket" and market.domain == "sports":
         if not market.question.endswith("win the 2026 FIFA World Cup?"):

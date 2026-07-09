@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from rwoo.parsers import parse_economics_market, parse_weather_market
+
 
 @dataclass(frozen=True)
 class MarketCoverage:
@@ -30,19 +32,12 @@ def classify_market_shape(market) -> MarketCoverage:
         )
 
     if market.venue == "kalshi" and market.domain == "weather":
-        series_ticker = raw_market.get("series_ticker") or str(raw_market.get("event_ticker", "")).split("-", 1)[0]
-        if series_ticker.startswith("KXHIGH") and raw_market.get("strike_type"):
-            return MarketCoverage(
-                family="weather.temperature",
-                shape="daily_high_threshold",
-                status="engine_available",
-                reason="supported Kalshi high-temperature market with structured strike fields",
-            )
+        parsed = parse_weather_market(market)
         return MarketCoverage(
-            family="weather",
-            shape="unparsed_weather",
-            status="parse_missing",
-            reason="weather market is included, but station/metric/date/strike parsing is not complete",
+            family=parsed.family,
+            shape=parsed.shape,
+            status=parsed.status,
+            reason=parsed.reason,
         )
 
     if market.venue == "kalshi" and market.domain == "economics":
@@ -53,6 +48,14 @@ def classify_market_shape(market) -> MarketCoverage:
                 shape="monthly_threshold",
                 status="engine_available",
                 reason="supported Kalshi core-CPI market with structured strike fields",
+            )
+        parsed = parse_economics_market(market)
+        if parsed is not None:
+            return MarketCoverage(
+                family=parsed.family,
+                shape=parsed.shape,
+                status=parsed.status,
+                reason=parsed.reason,
             )
         return _economics_shape_from_text(text, venue=market.venue)
 
@@ -67,14 +70,23 @@ def classify_market_shape(market) -> MarketCoverage:
         return _sports_shape_from_text(text, venue=market.venue)
 
     if market.domain == "economics":
+        parsed = parse_economics_market(market)
+        if parsed is not None:
+            return MarketCoverage(
+                family=parsed.family,
+                shape=parsed.shape,
+                status=parsed.status,
+                reason=parsed.reason,
+            )
         return _economics_shape_from_text(text, venue=market.venue)
 
     if market.domain == "weather":
+        parsed = parse_weather_market(market)
         return MarketCoverage(
-            family="weather",
-            shape="unparsed_weather",
-            status="parse_missing",
-            reason="weather market is included, but location/date/metric/strike parsing is not complete",
+            family=parsed.family,
+            shape=parsed.shape,
+            status=parsed.status,
+            reason=parsed.reason,
         )
 
     return MarketCoverage(

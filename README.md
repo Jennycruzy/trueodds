@@ -57,7 +57,9 @@ gate uses explicit runtime controls where live APIs are slow or quota-limited:
   Fed SPF probability distributions for historical calibration, and uses the
   official BLS flat-file mirror as a quota-free fallback when the BLS API is
   unavailable. The live economics engine now also consumes official
-  forward-looking Cleveland Fed nowcasts plus SPF density data.
+  forward-looking Cleveland Fed nowcasts plus SPF density data for core CPI,
+  and official BLS all-items CPI-U annual history for US headline-CPI annual
+  bins.
 - **Sports** scores every real per-team market from two real, resolved
   tournaments (Euro 2024, Copa América 2024) using a self-computed Elo rating
   history replayed from 49,506 real historical matches, because no public API
@@ -105,6 +107,9 @@ or a canned pass.
 - `src/rwoo/` — the engine, built out phase by phase:
   - `models.py` — the canonical market object.
   - `domain.py` — deterministic weather/economics/sports/other routing.
+  - `parsers.py` — venue-agnostic structured parsers that convert included
+    markets into engine inputs, with explicit missing reasons when a source,
+    parser, or model is not yet wired.
   - `coverage.py` — deterministic family/shape/status coverage registry for
     included markets.
   - `readers/kalshi.py`, `readers/polymarket.py`, `readers/limitless.py` —
@@ -117,7 +122,8 @@ or a canned pass.
   - `economic_sources.py` — official Cleveland Fed nowcast and Philadelphia
     Fed SPF probability-distribution readers.
   - `engines/economics.py` — official-history baseline plus official
-    forward-looking Cleveland Fed/SPF inputs for core-CPI markets.
+    forward-looking Cleveland Fed/SPF inputs for core-CPI markets, and a BLS
+    CPI-U annual-history path for US headline-CPI annual bins.
   - `engines/sports.py` — World Football Elo + official FIFA ranking baselines
     plus deterministic 48-team tournament simulators.
   - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against

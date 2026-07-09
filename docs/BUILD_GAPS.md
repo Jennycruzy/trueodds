@@ -201,9 +201,11 @@ Known support boundary:
   date, metric, strike, and settlement source clearly enough to feed
   `engines/weather.py`.
 - Economics Limitless markets exist, including headline CPI, GDP, recession,
-  and Fed-rate shapes. The current engine supports core CPI, not headline CPI
-  or GDP/Fed/recession markets, so those are included with non-actionable
-  reasons until the matching engines exist.
+  and Fed-rate shapes. The current engine now prices US annual headline-CPI
+  bins from official BLS all-items CPI-U history, but Limitless records remain
+  non-actionable until exact Limitless fees are wired. Non-US CPI sources,
+  monthly headline-CPI bins, GDP, Fed-rate, recession, and PPI markets still
+  need matching engines/sources.
 - Sports Limitless markets are broad. The current supported sports engine is
   2026 FIFA World Cup national-team outright winner only. NBA/NHL/EPL/tennis,
   esports, props, stages, exact matchups, and player-stat markets need their
@@ -216,7 +218,7 @@ Completion criteria:
   structured-enough settlement fields, and prove it with Phase 8 or a new gate.
 - Add exact Limitless fee calculation from official fee/profile/order rules.
 - Add new deterministic economics/sports engines before widening Limitless
-  actionable support beyond core-compatible CPI and World Cup outright shapes.
+  actionable support beyond US headline CPI and World Cup outright shapes.
 
 ### Broad venue coverage and engine expansion
 
@@ -232,10 +234,13 @@ Known gap: broad inclusion is not the same as broad pricing. The next engine
 work should be added family by family, with verification per family:
 
 - Weather: parse any venue's location/date/metric/strike into the existing
-  weather engine before widening sports. Fixing weather coverage remains the
-  priority whenever a real weather market is available.
-- Economics: headline CPI monthly/annual, GDP, Fed-rate path/decision,
-  recession, PPI, and labor markets each need source-backed engines.
+  weather engine before widening sports. The structured parser layer exists
+  for Kalshi high-temperature markets and recognizes low/rain/snow/wind as
+  explicit missing metric families; fixing weather coverage remains the
+  priority whenever a real non-Kalshi weather market is available.
+- Economics: US annual headline CPI is now priced from BLS CPI-U history.
+  Headline CPI monthly, non-US CPI, GDP, Fed-rate path/decision, recession,
+  PPI, and labor markets each still need source-backed engines.
 - Sports: tennis match/tournament, NBA/NHL futures, soccer club outrights,
   esports, World Cup stages/props, and player props each need their own source
   and model path.
@@ -248,7 +253,7 @@ Completion criteria:
 - Require every included domain market to carry family, shape, coverage status,
   and missing capability text when not priced.
 - Add at least one new engine family per phase, starting with weather when a
-  parseable market is present, then headline CPI/GDP/Fed.
+  parseable market is present, then GDP/Fed.
 
 ### Public calibration page
 
