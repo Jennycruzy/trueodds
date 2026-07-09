@@ -168,36 +168,50 @@ def _sports_shape_from_text(text: str, venue: str) -> MarketCoverage:
         return MarketCoverage(
             family="sports.tennis",
             shape="match_winner",
-            status="model_missing",
-            reason=f"{venue} tennis match market included; tennis match engine is not wired yet",
+            status="source_missing",
+            reason=(
+                f"{venue} tennis match market included; assessed 2026-07-09: official ATP rankings "
+                "return HTTP 403 from this workspace and no verified alternative ratings source is wired"
+            ),
         )
     if "wimbledon" in text and "winner" in text:
         return MarketCoverage(
             family="sports.tennis",
             shape="tournament_winner",
-            status="model_missing",
-            reason=f"{venue} tennis outright market included; tennis tournament engine is not wired yet",
+            status="source_missing",
+            reason=(
+                f"{venue} tennis outright market included; assessed 2026-07-09: no verified tennis "
+                "ratings source is reachable from this workspace"
+            ),
         )
     if "nba" in text and ("champion" in text or "winner" in text):
         return MarketCoverage(
             family="sports.nba",
             shape="league_champion",
-            status="model_missing",
-            reason=f"{venue} NBA champion market included; NBA futures engine is not wired yet",
+            status="source_missing",
+            reason=(
+                f"{venue} NBA champion market included; assessed 2026-07-09: stats.nba.com times out "
+                "from this workspace and no verified alternative ratings source is wired"
+            ),
         )
     if "nhl" in text and ("champion" in text or "winner" in text):
         return MarketCoverage(
             family="sports.nhl",
             shape="league_champion",
             status="model_missing",
-            reason=f"{venue} NHL champion market included; NHL futures engine is not wired yet",
+            reason=(
+                f"{venue} NHL champion market included; the official NHL API is verified reachable "
+                "(2026-07-09), but an offseason standings-only prior for next season's champion cannot "
+                "honestly clear the restraint confidence floor, so the engine is deferred until the "
+                "2026-27 season provides real results"
+            ),
         )
     if "world cup" in text and "stage of elimination" in text:
         return MarketCoverage(
             family="sports.world_cup",
             shape="stage_of_elimination",
-            status="model_missing",
-            reason=f"{venue} World Cup stage market included; stage-probability engine is not wired yet",
+            status="parse_missing",
+            reason=f"{venue} World Cup stage market recognized, but team/stage could not be parsed from its title",
         )
     if "world cup" in text and ("matchup" in text or "top goalscorer" in text or "goal" in text):
         return MarketCoverage(

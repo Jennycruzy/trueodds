@@ -27,9 +27,9 @@ WEATHER_SERIES = sorted(weather_stations.SERIES)
 # refusal path, e.g. KXFED far-dated meetings).
 ECONOMICS_SERIES = ["KXCPICORE", "KXECONSTATCPI", "KXCPIYOY", "KXGDP", "KXU3", "KXPAYROLLS", "KXFED"]
 SPORTS_SERIES = ["KXWCSTAGEOFELIM"]
-KALSHI_ACTIVE_DEFAULT_LIMIT = 500
-POLYMARKET_DEFAULT_LIMIT = 500
-LIMITLESS_DEFAULT_LIMIT = 500
+KALSHI_ACTIVE_DEFAULT_LIMIT = 2000
+POLYMARKET_DEFAULT_LIMIT = 2000
+LIMITLESS_DEFAULT_LIMIT = 1000
 
 
 @dataclass
@@ -416,6 +416,12 @@ def scan_opportunities(
         "top": [asdict(record) for record in ranked],
         "included_unsupported": [asdict(record) for record in included_unsupported],
         "action_rule": "YES if price < prob_low - costs; NO if price > prob_high + costs; otherwise no trade",
+        "ingestion_boundary": (
+            "every Kalshi series with a wired engine family is swept completely (all weather "
+            "stations, all wired economics series, World Cup stages); the broad Kalshi census batch "
+            "is capped because the full open universe measured >600k markets on 2026-07-09, "
+            "dominated by combinatorial sports multigame/parlay series with no engine"
+        ),
     }
 
 
