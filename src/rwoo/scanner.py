@@ -14,13 +14,15 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from rwoo import edge
+from rwoo import edge, weather_stations
 from rwoo.coverage import classify_market_shape
 from rwoo.engines import economics, sports, weather
 from rwoo.parsers import parse_economics_market, parse_weather_market
 from rwoo.readers import kalshi, limitless, polymarket
 
-WEATHER_SERIES = ["KXHIGHNY", "KXHIGHCHI", "KXHIGHLAX", "KXHIGHMIA", "KXHIGHDEN"]
+# Every weather series with a verified station is swept completely; the
+# registry in weather_stations.py is the single source of truth.
+WEATHER_SERIES = sorted(weather_stations.SERIES)
 ECONOMICS_SERIES = ["KXCPICORE"]
 KALSHI_ACTIVE_DEFAULT_LIMIT = 500
 POLYMARKET_DEFAULT_LIMIT = 500
@@ -170,7 +172,7 @@ def evaluate_market(market) -> ScanRecord | None:
 
     if market.domain == "weather":
         parsed = parse_weather_market(market)
-        if parsed.status != "engine_available" or parsed.metric != "temperature_2m_max":
+        if parsed.status != "engine_available" or parsed.metric not in weather.METRICS:
             return None
         lat = parsed.raw.get("lat")
         lon = parsed.raw.get("lon")
@@ -185,6 +187,7 @@ def evaluate_market(market) -> ScanRecord | None:
             floor_strike=parsed.floor_strike,
             cap_strike=parsed.cap_strike,
             include_base_rate=False,
+            metric=parsed.metric,
         )
     elif market.venue == "kalshi" and market.domain == "economics":
         event_ticker = raw_market.get("event_ticker", "")
@@ -286,10 +289,12 @@ def scan_opportunities(
     markets = []
 
     markets.extend(kalshi.fetch_canonical_active_markets(max_markets=kalshi_active_limit))
-    for series in WEATHER_SERIES:
-        markets.extend(kalshi.fetch_canonical_markets_for_series(series, limit=max_weather_markets_per_series))
-    for series in ECONOMICS_SERIES:
-        markets.extend(kalshi.fetch_canonical_markets_for_series(series, limit=max_economics_markets))
+    markets.extend(
+        kalshi.fetch_canonical_markets_for_series_batch(WEATHER_SERIES, limit=max_weather_markets_per_series)
+    )
+    markets.extend(
+        kalshi.fetch_canonical_markets_for_series_batch(ECONOMICS_SERIES, limit=max_economics_markets)
+    )
     markets.extend(polymarket.fetch_canonical_active_markets(max_markets=polymarket_limit))
     if include_limitless:
         markets.extend(limitless.fetch_canonical_markets(active_limit=limitless_limit))

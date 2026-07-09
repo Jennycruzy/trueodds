@@ -3,6 +3,7 @@
 Base URL, auth (none needed for public market reads), and field shapes are
 all verified live against the real API; see docs/VERIFICATION_LEDGER.md §2.
 """
+import time
 from datetime import datetime, timezone
 
 import httpx
@@ -35,6 +36,21 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _get_json(client: httpx.Client, url: str, params: dict | None = None, attempts: int = 6) -> dict:
+    """GET with polite handling of Kalshi's real rate limit. Broad scans hit
+    HTTP 429 well before any other failure mode (verified live 2026-07-09 at
+    ~1000-market pages in quick succession); backing off and retrying is the
+    difference between an exhaustive read and a scan that dies mid-sweep."""
+    for attempt in range(1, attempts + 1):
+        resp = client.get(url, params=params)
+        if resp.status_code == 429 and attempt < attempts:
+            time.sleep(1.5 * attempt)
+            continue
+        resp.raise_for_status()
+        return resp.json()
+    raise RuntimeError(f"Kalshi rate limit persisted after {attempts} attempts: {url}")
+
+
 def fetch_event(event_ticker: str, client: httpx.Client | None = None) -> dict:
     """Fetch a Kalshi event, which embeds its markets and its
     settlement_sources — the event level is where category and the named
@@ -42,24 +58,25 @@ def fetch_event(event_ticker: str, client: httpx.Client | None = None) -> dict:
     own_client = client is None
     client = client or httpx.Client(timeout=15)
     try:
-        resp = client.get(f"{BASE_URL}/events/{event_ticker}")
-        resp.raise_for_status()
-        return resp.json()
+        return _get_json(client, f"{BASE_URL}/events/{event_ticker}")
     finally:
         if own_client:
             client.close()
 
 
-def fetch_markets(series_ticker: str, limit: int = 100, client: httpx.Client | None = None) -> list[dict]:
+def fetch_markets(
+    series_ticker: str,
+    limit: int = 100,
+    status: str | None = None,
+    client: httpx.Client | None = None,
+) -> list[dict]:
     own_client = client is None
     client = client or httpx.Client(timeout=15)
+    params: dict[str, object] = {"limit": limit, "series_ticker": series_ticker}
+    if status:
+        params["status"] = status
     try:
-        resp = client.get(
-            f"{BASE_URL}/markets",
-            params={"limit": limit, "series_ticker": series_ticker},
-        )
-        resp.raise_for_status()
-        return resp.json().get("markets", [])
+        return _get_json(client, f"{BASE_URL}/markets", params).get("markets", [])
     finally:
         if own_client:
             client.close()
@@ -68,7 +85,7 @@ def fetch_markets(series_ticker: str, limit: int = 100, client: httpx.Client | N
 def fetch_active_markets(
     *,
     max_markets: int = 500,
-    page_limit: int = 200,
+    page_limit: int = 1000,
     status: str = "open",
     client: httpx.Client | None = None,
 ) -> list[dict]:
@@ -84,9 +101,7 @@ def fetch_active_markets(
             }
             if cursor:
                 params["cursor"] = cursor
-            resp = client.get(f"{BASE_URL}/markets", params=params)
-            resp.raise_for_status()
-            data = resp.json()
+            data = _get_json(client, f"{BASE_URL}/markets", params)
             batch = data.get("markets", [])
             if not batch:
                 break
@@ -94,6 +109,7 @@ def fetch_active_markets(
             cursor = data.get("cursor")
             if not cursor:
                 break
+            time.sleep(0.3)  # stay inside the public rate limit on long sweeps
         return markets
     finally:
         if own_client:
@@ -175,6 +191,22 @@ def fetch_canonical_markets_for_series(
     client: httpx.Client | None = None,
 ) -> list[CanonicalMarket]:
     return [market_row_to_canonical(m) for m in fetch_markets(series_ticker, limit=limit, client=client)]
+
+
+def fetch_canonical_markets_for_series_batch(
+    series_tickers: list[str],
+    limit: int = 100,
+    status: str | None = "open",
+) -> list[CanonicalMarket]:
+    """Open markets across many series on one shared client, throttled so a
+    40-series weather sweep doesn't trip the rate limit partway through."""
+    out: list[CanonicalMarket] = []
+    with httpx.Client(timeout=20) as client:
+        for series_ticker in series_tickers:
+            rows = fetch_markets(series_ticker, limit=limit, status=status, client=client)
+            out.extend(market_row_to_canonical(m) for m in rows)
+            time.sleep(0.25)
+    return out
 
 
 def fetch_canonical_active_markets(max_markets: int = 500) -> list[CanonicalMarket]:

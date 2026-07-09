@@ -11,8 +11,9 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
+from rwoo.engines.weather import METRICS as WEATHER_ENGINE_METRICS
 from rwoo.readers import kalshi
-from rwoo.weather_stations import STATIONS, WEATHER_TIMEZONES, station_for_series
+from rwoo.weather_stations import STATIONS, WEATHER_TIMEZONES, metric_for_series, station_for_series
 
 
 @dataclass(frozen=True)
@@ -54,13 +55,19 @@ def parse_weather_market(market) -> ParsedMarket:
 
     text = " ".join(part for part in (market.question, market.resolution_rule) if part)
     metric = _weather_metric_from_text(text)
-    if metric is not None and metric != "temperature_2m_max":
+    if metric is not None:
+        engine_exists = metric in WEATHER_ENGINE_METRICS
         return ParsedMarket(
             domain="weather",
-            family="weather.temperature",
+            family=_family_for_weather_metric(metric),
             shape=_shape_for_weather_metric(metric),
-            status="model_missing",
-            reason=f"{metric} weather market is recognized, but that weather metric engine is not wired yet",
+            status="parse_missing" if engine_exists else "model_missing",
+            reason=(
+                f"{metric} weather market is recognized and the {metric} engine exists, but this venue's "
+                "market does not expose structured station/date/strike fields to feed it"
+                if engine_exists
+                else f"{metric} weather market is recognized, but that weather metric engine is not wired yet"
+            ),
             metric=metric,
             settlement_source=market.resolution_source,
             raw={"question": market.question, "resolution_rule": market.resolution_rule},
@@ -126,7 +133,7 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
     if series_ticker not in STATIONS:
         return ParsedMarket(
             domain="weather",
-            family="weather.temperature",
+            family=_family_for_weather_metric(metric),
             shape=_shape_for_weather_metric(metric),
             status="source_missing",
             reason=f"Kalshi weather series {series_ticker!r} has no verified station coordinates",
@@ -138,7 +145,7 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
     if not event_ticker:
         return ParsedMarket(
             domain="weather",
-            family="weather.temperature",
+            family=_family_for_weather_metric(metric),
             shape=_shape_for_weather_metric(metric),
             status="parse_missing",
             reason="Kalshi weather market is missing event_ticker, so target date cannot be parsed",
@@ -152,7 +159,7 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
     if not strike_type:
         return ParsedMarket(
             domain="weather",
-            family="weather.temperature",
+            family=_family_for_weather_metric(metric),
             shape=_shape_for_weather_metric(metric),
             status="parse_missing",
             reason="Kalshi weather market is missing structured strike_type",
@@ -163,15 +170,15 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
         )
 
     station = station_for_series(series_ticker)
-    status = "engine_available" if metric == "temperature_2m_max" else "model_missing"
+    status = "engine_available" if metric in WEATHER_ENGINE_METRICS else "model_missing"
     reason = (
-        "supported high-temperature market with verified station/date/strike fields"
+        f"supported {metric} market with verified station/date/strike fields"
         if status == "engine_available"
         else f"{metric} weather market is parsed, but that weather metric engine is not wired yet"
     )
     return ParsedMarket(
         domain="weather",
-        family="weather.temperature",
+        family=_family_for_weather_metric(metric),
         shape=_shape_for_weather_metric(metric),
         status=status,
         reason=reason,
@@ -194,11 +201,26 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
 
 
 def _kalshi_weather_metric(series_ticker: str) -> str | None:
+    """Metric for a Kalshi weather series. The verified station registry is
+    the source of truth; the prefix fallback only *recognizes* temperature
+    series that are not registered yet (they then surface as source_missing
+    because no verified station exists, rather than disappearing)."""
+    registered = metric_for_series(series_ticker)
+    if registered is not None:
+        return registered
     if series_ticker.startswith("KXHIGH"):
         return "temperature_2m_max"
     if series_ticker.startswith("KXLOW"):
         return "temperature_2m_min"
     return None
+
+
+def _family_for_weather_metric(metric: str) -> str:
+    if metric.startswith("temperature"):
+        return "weather.temperature"
+    if metric in ("precipitation_sum", "snowfall_sum"):
+        return "weather.precipitation"
+    return "weather"
 
 
 def _weather_metric_from_text(text: str) -> str | None:

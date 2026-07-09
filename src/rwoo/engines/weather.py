@@ -55,14 +55,61 @@ MODELS = ["ecmwf_ifs025", "gfs_seamless", "icon_seamless"]
 # instrument/model rounding granularity for a 1-day-out max-temp forecast.
 MIN_STD_F = 1.5
 
+# Supported Open-Meteo daily metrics. Each entry documents the unit the
+# engine works in, the matching NASA POWER parameter for the climatological
+# base rate (None = POWER has no equivalent daily series), the ensemble-std
+# floor in that unit, and a confidence cap. Temperatures keep no extra cap
+# (the band already carries the uncertainty). Precipitation/snowfall are
+# zero-bounded and heavily skewed, so a normal CDF over a 3-model ensemble is
+# a weaker assumption there — the cap keeps that stated instead of implicit.
+METRICS: dict[str, dict] = {
+    "temperature_2m_max": {
+        "openmeteo_units": {"temperature_unit": "fahrenheit"},
+        "nasa_power_param": "T2M_MAX",
+        "min_std": MIN_STD_F,
+        "confidence_cap": 1.0,
+        "unit": "F",
+    },
+    "temperature_2m_min": {
+        "openmeteo_units": {"temperature_unit": "fahrenheit"},
+        "nasa_power_param": "T2M_MIN",
+        "min_std": MIN_STD_F,
+        "confidence_cap": 1.0,
+        "unit": "F",
+    },
+    "precipitation_sum": {
+        "openmeteo_units": {"precipitation_unit": "inch"},
+        "nasa_power_param": "PRECTOTCORR",  # mm/day; converted to inches below
+        "min_std": 0.05,
+        "confidence_cap": 0.65,
+        "unit": "in",
+    },
+    "snowfall_sum": {
+        "openmeteo_units": {"precipitation_unit": "inch"},
+        "nasa_power_param": None,  # NASA POWER has no daily snowfall series
+        "min_std": 0.5,
+        "confidence_cap": 0.65,
+        "unit": "in",
+    },
+}
+
 
 def _normal_cdf(z: float) -> float:
     return 0.5 * (1 + math.erf(z / math.sqrt(2)))
 
 
-def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_name: str) -> dict[str, float]:
-    """target_date: 'YYYY-MM-DD'. Returns {model_name: forecast_max_temp_F}."""
-    cache_key = (round(lat, 4), round(lon, 4), target_date, timezone_name)
+def fetch_model_forecasts(
+    lat: float,
+    lon: float,
+    target_date: str,
+    timezone_name: str,
+    metric: str = "temperature_2m_max",
+) -> dict[str, float]:
+    """target_date: 'YYYY-MM-DD'. Returns {model_name: forecast value} in the
+    metric's documented unit (°F for temperatures, inches for precip/snow)."""
+    if metric not in METRICS:
+        raise ValueError(f"Unsupported weather metric: {metric!r}")
+    cache_key = (round(lat, 4), round(lon, 4), target_date, timezone_name, metric)
     if cache_key in _FORECAST_CACHE:
         return dict(_FORECAST_CACHE[cache_key])
     resp = _get_with_retry(
@@ -70,8 +117,8 @@ def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_nam
         params={
             "latitude": lat,
             "longitude": lon,
-            "daily": "temperature_2m_max",
-            "temperature_unit": "fahrenheit",
+            "daily": metric,
+            **METRICS[metric]["openmeteo_units"],
             "timezone": timezone_name,
             "models": ",".join(MODELS),
             "start_date": target_date,
@@ -82,7 +129,7 @@ def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_nam
     daily = data["daily"]
     out = {}
     for model in MODELS:
-        key = f"temperature_2m_max_{model}"
+        key = f"{metric}_{model}"
         values = daily.get(key)
         if values and values[0] is not None:
             out[model] = values[0]
@@ -90,11 +137,22 @@ def fetch_model_forecasts(lat: float, lon: float, target_date: str, timezone_nam
     return out
 
 
-def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, years_back: int = 20) -> dict[int, float]:
-    """Real historical daily max temps (°F) for the same calendar day across
-    `years_back` years, from NASA POWER. Used only for the climatological
-    base rate — never for the forecast probability itself."""
-    cache_key = (round(lat, 4), round(lon, 4), month, day, years_back)
+def fetch_historical_daily(
+    lat: float,
+    lon: float,
+    month: int,
+    day: int,
+    years_back: int = 20,
+    metric: str = "temperature_2m_max",
+) -> dict[int, float]:
+    """Real historical daily values for the same calendar day across
+    `years_back` years, from NASA POWER, in the metric's engine unit. Used
+    only for the climatological base rate — never for the forecast
+    probability itself. Metrics without a POWER equivalent return {}."""
+    power_param = METRICS[metric]["nasa_power_param"]
+    if power_param is None:
+        return {}
+    cache_key = (round(lat, 4), round(lon, 4), month, day, years_back, power_param)
     if cache_key in _HISTORICAL_CACHE:
         return dict(_HISTORICAL_CACHE[cache_key])
     end_year = datetime.now(timezone.utc).year - 1  # last fully-observed year
@@ -102,7 +160,7 @@ def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, yea
     resp = _get_with_retry(
         NASA_POWER_URL,
         params={
-            "parameters": "T2M_MAX",
+            "parameters": power_param,
             "community": "RE",
             "longitude": lon,
             "latitude": lat,
@@ -113,15 +171,24 @@ def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, yea
         timeout=30,
     )
     data = resp.json()
-    series = data["properties"]["parameter"]["T2M_MAX"]
+    series = data["properties"]["parameter"][power_param]
     target_suffix = f"{month:02d}{day:02d}"
     out = {}
-    for date_str, celsius in series.items():
-        if date_str[4:8] == target_suffix and celsius is not None and celsius > -900:  # NASA POWER fill value is -999
+    for date_str, value in series.items():
+        if date_str[4:8] == target_suffix and value is not None and value > -900:  # NASA POWER fill value is -999
             year = int(date_str[:4])
-            out[year] = celsius * 9 / 5 + 32
+            if power_param.startswith("T2M"):
+                out[year] = value * 9 / 5 + 32  # POWER temperatures are °C
+            elif power_param == "PRECTOTCORR":
+                out[year] = value / 25.4  # POWER precipitation is mm/day
+            else:
+                out[year] = value
     _HISTORICAL_CACHE[cache_key] = dict(out)
     return out
+
+
+def fetch_historical_daily_max(lat: float, lon: float, month: int, day: int, years_back: int = 20) -> dict[int, float]:
+    return fetch_historical_daily(lat, lon, month, day, years_back, metric="temperature_2m_max")
 
 
 def check_resolution(value: float, strike_type: str, floor_strike, cap_strike) -> bool:
@@ -136,8 +203,10 @@ def check_resolution(value: float, strike_type: str, floor_strike, cap_strike) -
     raise ValueError(f"Unknown strike_type: {strike_type!r}")
 
 
-def _probability_from_ensemble(mean: float, std: float, strike_type: str, floor_strike, cap_strike) -> float:
-    std = max(std, MIN_STD_F)
+def _probability_from_ensemble(
+    mean: float, std: float, strike_type: str, floor_strike, cap_strike, min_std: float = MIN_STD_F
+) -> float:
+    std = max(std, min_std)
     if strike_type == "greater":
         return 1 - _normal_cdf((floor_strike - mean) / std)
     if strike_type == "less":
@@ -156,8 +225,13 @@ def compute_weather_probability(
     floor_strike,
     cap_strike,
     include_base_rate: bool = True,
+    metric: str = "temperature_2m_max",
 ) -> dict:
-    forecasts = fetch_model_forecasts(lat, lon, target_date, timezone_name)
+    if metric not in METRICS:
+        raise ValueError(f"Unsupported weather metric: {metric!r}")
+    metric_spec = METRICS[metric]
+    min_std = metric_spec["min_std"]
+    forecasts = fetch_model_forecasts(lat, lon, target_date, timezone_name, metric=metric)
     if len(forecasts) < 2:
         return {
             "oracle_prob": None,
@@ -175,7 +249,7 @@ def compute_weather_probability(
     values = list(forecasts.values())
     mean = statistics.fmean(values)
     std = statistics.pstdev(values)  # population stdev — these are all the models we asked for, not a sample
-    raw_prob = _probability_from_ensemble(mean, std, strike_type, floor_strike, cap_strike)
+    raw_prob = _probability_from_ensemble(mean, std, strike_type, floor_strike, cap_strike, min_std=min_std)
     oracle_prob = min(1.0, max(0.0, raw_prob))
 
     per_model_vote = {
@@ -196,17 +270,20 @@ def compute_weather_probability(
     # probability against this band directly, and confidence falls out of it
     # for free instead of needing a separately invented decay formula.
     per_model_prob = {
-        model: min(1.0, max(0.0, _probability_from_ensemble(v, MIN_STD_F, strike_type, floor_strike, cap_strike)))
+        model: min(
+            1.0,
+            max(0.0, _probability_from_ensemble(v, min_std, strike_type, floor_strike, cap_strike, min_std=min_std)),
+        )
         for model, v in forecasts.items()
     }
     prob_low = min(per_model_prob.values())
     prob_high = max(per_model_prob.values())
-    confidence = 1.0 - (prob_high - prob_low)
+    confidence = min(metric_spec["confidence_cap"], 1.0 - (prob_high - prob_low))
 
     historical = {}
     if include_base_rate:
         month, day = int(target_date[5:7]), int(target_date[8:10])
-        historical = fetch_historical_daily_max(lat, lon, month, day)
+        historical = fetch_historical_daily(lat, lon, month, day, metric=metric)
     if not historical:
         base_rate = None
     else:
@@ -223,12 +300,15 @@ def compute_weather_probability(
         "per_model_vote": per_model_vote,
         "frac_models_voting_yes": frac_models_yes,
         "model_unanimity": model_unanimity,
+        "metric": metric,
+        "metric_unit": metric_spec["unit"],
         "ensemble_mean_f": mean,
         "ensemble_std_f": std,
-        "std_floored": std < MIN_STD_F,
+        "std_floored": std < min_std,
         "method": (
-            f"ensemble mean/std over {len(forecasts)} independent models -> normal CDF "
+            f"ensemble mean/std of {metric} over {len(forecasts)} independent models -> normal CDF "
             f"P(resolves yes) vs. strike_type={strike_type}"
+            f"{'' if metric_spec['confidence_cap'] >= 1.0 else '; confidence capped because a normal fit is a weak assumption for zero-bounded ' + metric}"
             f"{'' if include_base_rate else '; historical base-rate fetch intentionally skipped for this restraint-only check'}"
         ),
         "data_freshness": datetime.now(timezone.utc).isoformat(),
