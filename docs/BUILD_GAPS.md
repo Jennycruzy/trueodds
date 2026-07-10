@@ -107,12 +107,13 @@ Remaining (next session, in this order):
 3. Regenerate `data/public/opportunity_scan_latest.*` with a full scan and
    commit; compare coverage_status_counts against the 2026-07-09 morning
    artifact (parse_missing 328 / model_missing 298 should drop sharply).
-4. Update `docs/VERIFICATION_LEDGER.md` with this session's verified
-   sources: NOAA GHCND registry, NWS issuedby codes per series, Limitless
-   fee table + SDK effectiveFeeBps semantics, Cleveland YoY table, SPF
-   PRGDP/PRUNEMP/RECESS sheets + doc-PDF bins, FRED fredgraph CSVs
-   (DFEDTARU/UNRATE/PAYEMS), FOMC calendar page, GDPNow workbook
-   (TrackingHistory sheet), FIFA calendar/matches season 285023.
+4. ~~Update `docs/VERIFICATION_LEDGER.md` with this session's verified
+   sources~~ — DONE 2026-07-10: ledger §23 records the 2026-07-09
+   engine-breadth sources (NWS issuedby codes + NOAA GHCND registry, Cleveland
+   MoM/YoY nowcast tables, SPF PRCCPI/PRGDP/PRUNEMP/RECESS sheets + doc-PDF
+   bins, FRED DFEDTARU/UNRATE/PAYEMS CSVs, FOMC calendar, GDPNow
+   TrackingHistory sheet, FIFA calendar/matches season 285023); §22 records the
+   2026-07-10 tennis/NBA sources. (Limitless fee table is already in §21.)
 5. Re-run `python3 verify.py --phase 5/7/8` end to end (phase 8's Limitless
    fee check was rewritten; phases 5/7 should be unaffected but must be
    proven, not assumed).
