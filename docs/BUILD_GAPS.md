@@ -114,9 +114,14 @@ Remaining (next session, in this order):
    bins, FRED DFEDTARU/UNRATE/PAYEMS CSVs, FOMC calendar, GDPNow
    TrackingHistory sheet, FIFA calendar/matches season 285023); §22 records the
    2026-07-10 tennis/NBA sources. (Limitless fee table is already in §21.)
-5. Re-run `python3 verify.py --phase 5/7/8` end to end (phase 8's Limitless
-   fee check was rewritten; phases 5/7 should be unaffected but must be
-   proven, not assumed).
+5. ~~Re-run `python3 verify.py --phase 5/7/8` end to end~~ — DONE 2026-07-10:
+   all three PASS. No regression from the yes_subtitle/tennis/NBA changes; two
+   stale gate assertions were corrected for behavior the live state now
+   exercises: phase 7's sports check accepts the in-tournament exact-bracket
+   path (the WC is mid-knockout, so the engine conditions on real results
+   instead of the pre-tournament simulator ensemble), and phase 8 requires
+   real friction only on PRICED records (an honestly-refused GDP-Q3/Fed market
+   has oracle_prob None and no friction, which is correct, not a cost gap).
 6. Economics backtests for the new families (the calibration moat currently
    covers core CPI + WC outrights only): headline CPI monthly/annual and
    GDP need no-lookahead backtests before their confidence caps are raised.
