@@ -1,8 +1,102 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-10 (fourth session: recession-quarter routing wired +
-tested; third session: parser tests, Phase 9 coverage gate, tennis/NBA sources,
-head-to-head YES-side binding)
+Last updated: 2026-07-10 (fifth session: callable ASP HTTP API, OKX Agent
+Payments x402 402 flow, and the public web frontend built + tested + staged on
+the VPS; fourth session: recession-quarter routing wired + tested; third
+session: parser tests, Phase 9 coverage gate, tennis/NBA sources, head-to-head
+YES-side binding)
+
+## 2026-07-10 Session — ASP API, payment flow, and public frontend (RESUME HERE)
+
+The software half of the ASP/listing program is built, tested, and staged. The
+remaining work is **deployment**, which is hard-gated on operator inputs that
+must not be guessed. Pick up at "Next steps when the domain lands" below.
+
+### Done this session (145 tests pass: 94 existing + 23 API + 17 payment + 11 site)
+
+- **Paid HTTP API** — `rwoo.api.app:app` (FastAPI). Three services:
+  `POST /v1/check-market`, `POST /v1/cross-venue-edge`,
+  `GET /v1/calibration[/{family}[/{model_version}]]`. Supporting endpoints:
+  `/healthz`, `/readyz`, `/version`, `/v1/service-metadata`,
+  `/v1/supported-markets`, `/v1/evidence/status`,
+  `/v1/receipts/{hash}[/verify]`, `/openapi.json`, `/docs`, `/redoc`.
+  Strict request schemas, stable error taxonomy, request-id propagation,
+  body-size cap, restricted CORS + trusted hosts, security headers, no-store on
+  results, no stack traces. Every probability still comes from
+  `scanner.evaluate_market`; unsupported/unbindable markets fail closed with a
+  stable refusal (never a silent zero). Decision receipts commit to an
+  append-only keccak256-chained ledger; in-process idempotency. Single-market
+  fetch-by-id helpers added to each reader (`fetch_canonical_market`).
+- **Payment (OKX Agent Payments / x402)** — `rwoo.api.payment`. Unpaid protected
+  request → 402 challenge (`x402Version` + `accepts`, `WWW-Authenticate:
+  Payment`); identical body + `X-PAYMENT` → server-side verify → 200 with
+  `PAYMENT-RESPONSE` and the payment reference linked into the receipt. Binds
+  payment to service, request hash, amount, recipient, asset, network, expiry;
+  rejects wrong-chain/token/recipient, insufficient, expired, replayed,
+  malformed, and any secret key material. Prices/asset/network/recipient come
+  ONLY from env; cryptographic settlement is delegated to an injected verifier
+  (`FacilitatorVerifier` is structural, not exercised). Dev `StubVerifier`
+  cannot run in production; an enabled-but-incomplete config fails closed at
+  boot. **Disabled by default (free mode).**
+- **Public frontend** — `rwoo.site.app:app` (separate FastAPI app, Jinja2). All
+  10 pages (`/`, `/docs`, `/playground`, `/calibration`, `/markets`,
+  `/receipts`, `/methodology`, `/status`, `/privacy`, `/terms`) + robots,
+  sitemap, favicon. Every metric read live from the published artifacts and the
+  receipt ledger; honest empty states; real (not hardcoded) live example
+  verdict. Validated accessible palette, light/dark, reduced-motion, keyboard
+  access. privacy/terms show operator-identity-pending until `RWOO_LEGAL_ENTITY`
+  is set.
+- **VPS staging (isolated)** — cloned to `/opt/rwoo/staging` as the `rwoo` user
+  with its own venv; 145 tests pass on the box; API booted on `127.0.0.1:8090`
+  only and shut down. The old artifact server (`rwoo-artifacts.service` on
+  `:8088`) and all other tenants on the shared box were left untouched. Nothing
+  is publicly exposed yet.
+
+### Blocked — operator inputs still needed (do not guess)
+
+1. **Dedicated domain** (leaning `.xyz` or `.ai`) + DNS access. DNS: `A @` and
+   `A api` → `38.49.216.59`, `CNAME www`.
+2. **Support email** → `RWOO_SUPPORT_EMAIL`.
+3. **Legal entity** for privacy/terms → `RWOO_LEGAL_ENTITY`.
+4. **Payment go-live only:** approved network + asset + decimals, pay-to
+   recipient/wallet, per-service prices, facilitator URL, and confirmation of
+   the exact OKX facilitator verify/settle schema. Until then payments stay off.
+5. **Security:** rotate the VPS root password (was shared in chat); prefer SSH
+   keys.
+
+### Next steps when the domain lands (deploy sequence)
+
+1. Get domain + support email + Cloudflare yes/no (recommend BasicDNS first).
+2. Set env for both apps: `RWOO_PUBLIC_BASE_URL=https://<domain>`,
+   `RWOO_API_BASE_URL=https://api.<domain>`, `RWOO_DOCS_URL`,
+   `RWOO_CALIBRATION_URL`, `RWOO_RECEIPTS_URL`, `RWOO_SUPPORT_EMAIL`,
+   `RWOO_LEGAL_ENTITY`, `RWOO_ALLOWED_ORIGINS=https://<domain>`,
+   `RWOO_TRUSTED_HOSTS=<domain>,api.<domain>`.
+3. Two hardened systemd units (least-privilege, `rwoo` user, localhost bind):
+   `uvicorn rwoo.api.app:app` (API) and `uvicorn rwoo.site.app:app` (site).
+4. Isolated nginx vhosts: `<domain>` → site, `api.<domain>` → API. Preserve
+   body, payment, request-id, idempotency headers; never cache paid responses or
+   402 challenges; expose `/docs` + `/openapi.json`; no admin routes. Do not
+   touch the other tenants' vhosts.
+5. certbot: separate certs for root and `api.`; HTTP→HTTPS redirect; renewal
+   dry-run must pass. Do not modify unrelated certs.
+6. Promote `/opt/rwoo/staging` → `current` atomically with a timestamped
+   rollback; keep `:8088` until the new stack is proven, then retire it.
+7. External acceptance: root HTTPS, API metadata, health/readiness, OpenAPI/docs,
+   correct unpaid 402 (once payments enabled), header preservation, closed
+   internal ports (do not open 8090/8000 in ufw — nginx proxies from localhost),
+   renewal dry-run, unrelated services healthy, mobile pages.
+8. OKX.AI listing package: website, API base, docs, calibration, receipts,
+   status, support URLs — copy-ready only after external tests pass.
+
+### Do NOT in deployment
+
+No funded execution. No exposing the API/site on the raw IP or a non-dedicated
+domain. No changes to the other ~10 tenants on the shared VPS (nginx, certs,
+ufw, docker, postgres, ollama, pm2). No enabling payments without every value in
+item 4 above.
+
+
 
 ## 2026-07-10 Production evidence and oracle-product hardening
 
