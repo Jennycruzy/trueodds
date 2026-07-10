@@ -982,7 +982,9 @@ def phase_5():
 
     if weather_records:
         print(f"Built {len(weather_records)} calibration records from real finalized Kalshi weather markets")
-        print("across all 5 verified stations (NYC, Chicago, LA, Miami, Denver).\n")
+        high_count = sum(1 for record in weather_records if record.market_id.startswith("KXHIGH"))
+        low_count = sum(1 for record in weather_records if record.market_id.startswith("KXLOW"))
+        print(f"across the expanded verified high/low registry (high={high_count}, low={low_count}).\n")
         for idx, record in enumerate(weather_records[:10], start=1):
             print(f"{idx:02d}. {record.market_id}")
             print(f"    Question: {record.question}")
@@ -1125,6 +1127,15 @@ def phase_5():
 
     if economics_records:
         econ_curve, econ_brier, econ_gap, econ_recal_ok = _score_domain("economics", economics_records)
+        hdr("ECONOMICS — GROUPED WALK-FORWARD CHECK")
+        walk_forward = economics_backtest.economics_walk_forward_report(economics_records)
+        for family, report in walk_forward.items():
+            if report.get("eligible"):
+                print(f"  {family}: independent_groups={report['independent_groups']} "
+                      f"test_groups={report['test_groups']} original_brier={report['original_brier']:.4f} "
+                      f"recalibrated_brier={report['recalibrated_brier']:.4f}")
+            else:
+                print(f"  {family}: NOT ELIGIBLE — {report['reason']}")
     else:
         econ_curve, econ_brier, econ_gap, econ_recal_ok = _score_domain("economics", economics_records)
 
@@ -1198,6 +1209,10 @@ def phase_5():
     hdr("GATE 5 — ACCEPTANCE CRITERIA")
     checks = {
         f"At least 25 real resolved weather calibration records built (got {len(weather_records)})": len(weather_records) >= 25,
+        "Weather calibration includes both daily high and daily low markets": (
+            any(r.market_id.startswith("KXHIGH") for r in weather_records)
+            and any(r.market_id.startswith("KXLOW") for r in weather_records)
+        ),
         "Every weather record proves source availability <= decision < resolution": weather_no_lookahead_ok,
         "Weather reliability curve + Brier score printed": weather_brier is not None,
         "Weather recalibration path shown or honestly not triggered": weather_recal_ok,
@@ -2029,6 +2044,19 @@ def phase_9():
             ),
         ),
     }
+    for label, metric, threshold in (
+        ("weather.precipitation (daily total)", "precipitation_sum", 0.1),
+        ("weather.snowfall (daily total)", "snowfall_sum", 0.1),
+        ("weather.wind (daily maximum)", "wind_speed_10m_max", 20.0),
+        ("weather.wind (daily gust maximum)", "wind_gusts_10m_max", 30.0),
+    ):
+        family_markets[label] = _p9_market(
+            "limitless", "weather", question=f"Structured {label} probe",
+            raw={"weather": {"metric": metric, "latitude": 40.7789, "longitude": -73.9692,
+                  "timezone": "America/New_York", "target_date": weather_date.isoformat(),
+                  "location": "NY City Central Park", "settlement_source": "Open-Meteo",
+                  "strike_type": "greater", "floor_strike": threshold}},
+        )
     if gdp_quarter_label:
         family_markets["economics.gdp (quarterly)"] = _p9_market(
             "kalshi", "economics",
@@ -2065,6 +2093,10 @@ def phase_9():
 
     required_families = {
         "weather.temperature (daily low)",
+        "weather.precipitation (daily total)",
+        "weather.snowfall (daily total)",
+        "weather.wind (daily maximum)",
+        "weather.wind (daily gust maximum)",
         "economics.headline_cpi (monthly)",
         "economics.gdp (quarterly)",
         "economics.labor (U-3 unemployment)",
@@ -2090,6 +2122,21 @@ def phase_9():
         })
     show_json("Per-family live pricing", family_rows, max_chars=2000)
     per_family_pricing_ok = required_families.issubset(priced_families)
+
+    weather_skill_ok = False
+    try:
+        from rwoo.backtests import weather as weather_backtest
+        from rwoo.weather_stations import STATIONS_BY_CODE
+        skill_counts = {}
+        for metric in ("precipitation_sum", "snowfall_sum", "wind_speed_10m_max", "wind_gusts_10m_max"):
+            skill_records, _ = weather_backtest.build_metric_skill_backtest(
+                metric, stations=[("NYC", STATIONS_BY_CODE["NYC"])], days=1,
+            )
+            skill_counts[metric] = len(skill_records)
+        weather_skill_ok = all(count >= 4 for count in skill_counts.values())
+        show_json("Archived forecast-skill calibration probes", skill_counts, max_chars=700)
+    except Exception as exc:  # noqa: BLE001
+        print(f"FAIL: weather forecast-skill probe raised an error: {exc}")
 
     # ---- Part 3: honest refusal paths ----
     hdr("PART 3 — HONEST REFUSAL PATHS")
@@ -2153,6 +2200,7 @@ def phase_9():
         "Every ranked record carries family/shape/coverage-status": per_record_fields_ok,
         "Live inventory contains honest refusal statuses": refusal_states_ok,
         "Every newer engine family priced a real record from live data": per_family_pricing_ok,
+        "Rain/snow/wind archived forecasts score against historical reanalysis": weather_skill_ok,
         "Far-dated Fed market spanning a scheduled meeting is refused": fed_refusal_ok,
         "NBA champion outright is model_missing (source reachable, sim deferred)": nba_deferred_ok,
         "NBA head-to-head prices live but stays below the actionable floor": nba_priced_but_deferred_ok,

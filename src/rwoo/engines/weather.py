@@ -91,6 +91,20 @@ METRICS: dict[str, dict] = {
         "confidence_cap": 0.65,
         "unit": "in",
     },
+    "wind_speed_10m_max": {
+        "openmeteo_units": {"wind_speed_unit": "mph"},
+        "nasa_power_param": "WS10M_MAX",
+        "min_std": 2.0,
+        "confidence_cap": 0.60,
+        "unit": "mph",
+    },
+    "wind_gusts_10m_max": {
+        "openmeteo_units": {"wind_speed_unit": "mph"},
+        "nasa_power_param": None,
+        "min_std": 3.0,
+        "confidence_cap": 0.55,
+        "unit": "mph",
+    },
 }
 
 
@@ -216,6 +230,38 @@ def _probability_from_ensemble(
     raise ValueError(f"Unknown strike_type: {strike_type!r}")
 
 
+def event_probability(metric: str, values: list[float], strike_type: str, floor_strike, cap_strike) -> float:
+    """Metric-aware event probability; precipitation uses an atom at zero."""
+    spec = METRICS[metric]
+    if metric not in {"precipitation_sum", "snowfall_sum"}:
+        return _probability_from_ensemble(statistics.fmean(values), statistics.pstdev(values), strike_type,
+                                          floor_strike, cap_strike, min_std=spec["min_std"])
+    positives = [value for value in values if value > 0]
+    occurrence = (len(positives) + 0.05) / (len(values) + 1.0)  # weak dry prior; never absolute 0/1
+    mean = statistics.fmean(positives) if positives else 0.0
+    std = statistics.pstdev(positives) if len(positives) > 1 else spec["min_std"]
+    std = max(std, spec["min_std"])
+    cdf_zero = _normal_cdf((0 - mean) / std)
+    positive_mass = max(1e-12, 1 - cdf_zero)
+
+    def positive_interval(low: float, high: float | None) -> float:
+        low = max(0.0, low)
+        cdf_low = _normal_cdf((low - mean) / std)
+        cdf_high = 1.0 if high is None else _normal_cdf((max(0.0, high) - mean) / std)
+        return max(0.0, min(1.0, (cdf_high - cdf_low) / positive_mass))
+
+    if strike_type == "greater":
+        return occurrence if float(floor_strike) <= 0 else occurrence * positive_interval(float(floor_strike), None)
+    if strike_type == "less":
+        if float(cap_strike) <= 0:
+            return 0.0
+        return (1 - occurrence) + occurrence * positive_interval(0.0, float(cap_strike))
+    if strike_type == "between":
+        dry = 1 - occurrence if float(floor_strike) <= 0 <= float(cap_strike) else 0.0
+        return dry + occurrence * positive_interval(float(floor_strike), float(cap_strike))
+    raise ValueError(f"Unknown strike_type: {strike_type!r}")
+
+
 def compute_weather_probability(
     lat: float,
     lon: float,
@@ -249,7 +295,7 @@ def compute_weather_probability(
     values = list(forecasts.values())
     mean = statistics.fmean(values)
     std = statistics.pstdev(values)  # population stdev — these are all the models we asked for, not a sample
-    raw_prob = _probability_from_ensemble(mean, std, strike_type, floor_strike, cap_strike, min_std=min_std)
+    raw_prob = event_probability(metric, values, strike_type, floor_strike, cap_strike)
     oracle_prob = min(1.0, max(0.0, raw_prob))
 
     per_model_vote = {
@@ -272,12 +318,12 @@ def compute_weather_probability(
     per_model_prob = {
         model: min(
             1.0,
-            max(0.0, _probability_from_ensemble(v, min_std, strike_type, floor_strike, cap_strike, min_std=min_std)),
+            max(0.0, event_probability(metric, [v], strike_type, floor_strike, cap_strike)),
         )
         for model, v in forecasts.items()
     }
-    prob_low = min(per_model_prob.values())
-    prob_high = max(per_model_prob.values())
+    prob_low = min(oracle_prob, *per_model_prob.values())
+    prob_high = max(oracle_prob, *per_model_prob.values())
     confidence = min(metric_spec["confidence_cap"], 1.0 - (prob_high - prob_low))
 
     historical = {}

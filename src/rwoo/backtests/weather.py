@@ -21,13 +21,14 @@ from typing import Callable, Any
 import httpx
 
 from rwoo.calibration import CalibrationRecord, probability_bucket
-from rwoo.engines.weather import MIN_STD_F, _probability_from_ensemble
+from rwoo.engines.weather import METRICS, event_probability
 from rwoo.readers import kalshi
-from rwoo.weather_stations import station_for_series
+from rwoo.weather_stations import metric_for_series, station_for_series
 
 SINGLE_RUNS_URL = "https://single-runs-api.open-meteo.com/v1/forecast"
+HISTORICAL_URL = "https://archive-api.open-meteo.com/v1/archive"
 ARCHIVED_MODELS = ["ecmwf_ifs025", "gfs_global", "icon_global"]
-_SINGLE_RUN_CACHE: dict[tuple[float, float, str, str], dict[str, float]] = {}
+_SINGLE_RUN_CACHE: dict[tuple[float, float, str, str, str], dict[str, float]] = {}
 _DEFAULT_CACHE_DIR = Path(".cache/rwoo/open_meteo_single_runs")
 ProgressCallback = Callable[[dict[str, Any]], None]
 
@@ -46,7 +47,7 @@ def _get_with_retry(url: str, params: dict, timeout: float = 45, attempts: int =
     raise last_exc
 
 
-def _cache_path(cache_key: tuple[float, float, str, str], cache_dir: str | Path | None = None) -> Path:
+def _cache_path(cache_key: tuple, cache_dir: str | Path | None = None) -> Path:
     base = Path(cache_dir or os.environ.get("RWOO_OPEN_METEO_CACHE_DIR") or _DEFAULT_CACHE_DIR)
     key_json = json.dumps(cache_key, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(key_json.encode("utf-8")).hexdigest()
@@ -64,7 +65,7 @@ def _load_cached_single_run(cache_key: tuple[float, float, str, str], cache_dir:
 
 
 def _store_cached_single_run(
-    cache_key: tuple[float, float, str, str],
+    cache_key: tuple,
     params: dict,
     raw_response: dict,
     parsed_daily_max: dict[str, float],
@@ -79,7 +80,7 @@ def _store_cached_single_run(
                 "source_url": SINGLE_RUNS_URL,
                 "params": params,
                 "raw_response": raw_response,
-                "parsed_daily_max_f": parsed_daily_max,
+                "parsed_daily_values": parsed_daily_max,
             },
             sort_keys=True,
             indent=2,
@@ -134,24 +135,29 @@ def fetch_single_run_all_models(
     target_date: str,
     run: str,
     timezone_name: str = "America/New_York",
+    metric: str = "temperature_2m_max",
     cache_dir: str | Path | None = None,
 ) -> dict[str, float]:
     """One HTTP call for all archived models at once (Single Runs supports
     comma-separated `models=`, confirmed live) instead of one call per model
     — this is what makes pulling hundreds of real records practical."""
-    cache_key = (round(lat, 4), round(lon, 4), target_date, run)
+    cache_key = (round(lat, 4), round(lon, 4), target_date, run, metric)
     if cache_key in _SINGLE_RUN_CACHE:
         return dict(_SINGLE_RUN_CACHE[cache_key])
     cached = _load_cached_single_run(cache_key, cache_dir)
-    if cached and isinstance(cached.get("parsed_daily_max_f"), dict):
-        parsed = {k: float(v) for k, v in cached["parsed_daily_max_f"].items()}
+    if cached and isinstance(cached.get("parsed_daily_values"), dict):
+        parsed = {k: float(v) for k, v in cached["parsed_daily_values"].items()}
         _SINGLE_RUN_CACHE[cache_key] = dict(parsed)
         return parsed
     params = {
         "latitude": lat,
         "longitude": lon,
-        "hourly": "temperature_2m",
-        "temperature_unit": "fahrenheit",
+        "hourly": {
+            "temperature_2m_max": "temperature_2m", "temperature_2m_min": "temperature_2m",
+            "precipitation_sum": "precipitation", "snowfall_sum": "snowfall",
+            "wind_speed_10m_max": "wind_speed_10m", "wind_gusts_10m_max": "wind_gusts_10m",
+        }[metric],
+        **METRICS[metric]["openmeteo_units"],
         "timezone": timezone_name,
         "models": ",".join(ARCHIVED_MODELS),
         "run": run,
@@ -168,12 +174,15 @@ def fetch_single_run_all_models(
     times = hourly.get("time", [])
     out: dict[str, float] = {}
     for model in ARCHIVED_MODELS:
-        temps = hourly.get(f"temperature_2m_{model}")
-        if not temps:
+        variable = params["hourly"]
+        model_values = hourly.get(f"{variable}_{model}")
+        if not model_values:
             continue
-        values = [t for ts, t in zip(times, temps) if ts.startswith(target_date) and t is not None]
+        values = [v for ts, v in zip(times, model_values) if ts.startswith(target_date) and v is not None]
         if values:
-            out[model] = max(values)
+            out[model] = sum(values) if metric in {"precipitation_sum", "snowfall_sum"} else (
+                min(values) if metric == "temperature_2m_min" else max(values)
+            )
     _SINGLE_RUN_CACHE[cache_key] = dict(out)
     _store_cached_single_run(cache_key, params, data, out, cache_dir)
     return out
@@ -191,7 +200,8 @@ def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") 
         }
 
     station = station_for_series(series_ticker)
-    forecasts = fetch_single_run_all_models(station.lat, station.lon, target_date, run)
+    metric = metric_for_series(series_ticker) or "temperature_2m_max"
+    forecasts = fetch_single_run_all_models(station.lat, station.lon, target_date, run, metric=metric)
     if len(forecasts) < 2:
         return {
             "refused": True,
@@ -206,13 +216,8 @@ def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") 
         1.0,
         max(
             0.0,
-            _probability_from_ensemble(
-                mean,
-                std,
-                market["strike_type"],
-                market.get("floor_strike"),
-                market.get("cap_strike"),
-            ),
+            event_probability(metric, values, market["strike_type"],
+                              market.get("floor_strike"), market.get("cap_strike")),
         ),
     )
     per_model_prob = {
@@ -220,13 +225,8 @@ def compute_archived_probability(market: dict, series_ticker: str = "KXHIGHNY") 
             1.0,
             max(
                 0.0,
-                _probability_from_ensemble(
-                    value,
-                    MIN_STD_F,
-                    market["strike_type"],
-                    market.get("floor_strike"),
-                    market.get("cap_strike"),
-                ),
+                event_probability(metric, [value], market["strike_type"],
+                                  market.get("floor_strike"), market.get("cap_strike")),
             ),
         )
         for model, value in forecasts.items()
@@ -354,3 +354,64 @@ def build_weather_backtest(
         all_records.extend(records)
         all_raw_rows.extend(raw_rows)
     return all_records, all_raw_rows
+
+
+_METRIC_THRESHOLDS = {
+    "precipitation_sum": (0.0, 0.1, 0.5, 1.0),
+    "snowfall_sum": (0.0, 1.0, 3.0, 6.0),
+    "wind_speed_10m_max": (10.0, 20.0, 30.0, 40.0),
+    "wind_gusts_10m_max": (20.0, 30.0, 40.0, 50.0),
+}
+
+
+def fetch_historical_observation(lat: float, lon: float, target_date: str, timezone_name: str, metric: str) -> float:
+    data = _get_with_retry(HISTORICAL_URL, params={
+        "latitude": lat, "longitude": lon, "start_date": target_date, "end_date": target_date,
+        "daily": metric, "timezone": timezone_name, **METRICS[metric]["openmeteo_units"],
+    }).json()
+    values = data.get("daily", {}).get(metric) or []
+    if not values or values[0] is None:
+        raise RuntimeError(f"no historical {metric} observation for {target_date}")
+    return float(values[0])
+
+
+def build_metric_skill_backtest(metric: str, stations: list | None = None, days: int = 21) -> tuple[list[CalibrationRecord], list[dict]]:
+    """Forecast-skill calibration where no resolved venue markets exist.
+
+    Previous-day archived model runs are scored against Open-Meteo historical
+    reanalysis. This validates the metric transform, not venue settlement.
+    """
+    from rwoo.weather_stations import STATIONS_BY_CODE, STATION_TIMEZONES
+    if metric not in _METRIC_THRESHOLDS:
+        raise ValueError(f"no skill thresholds configured for {metric}")
+    stations = stations or list(STATIONS_BY_CODE.items())
+    records, raw_rows = [], []
+    today = datetime.now(timezone.utc).date()
+    for code, station in stations:
+        timezone_name = STATION_TIMEZONES[code]
+        for offset in range(7, 7 + days):  # allow reanalysis publication lag
+            target = (today - timedelta(days=offset)).isoformat(); run = _previous_day_06z(target)
+            try:
+                forecasts = fetch_single_run_all_models(station.lat, station.lon, target, run,
+                                                        timezone_name=timezone_name, metric=metric)
+                actual = fetch_historical_observation(station.lat, station.lon, target, timezone_name, metric)
+                if len(forecasts) < 2:
+                    raise RuntimeError("fewer than two archived models")
+            except Exception as exc:  # noqa: BLE001
+                raw_rows.append({"station": code, "target": target, "refused": True, "reason": str(exc)})
+                continue
+            mean, std = statistics.fmean(forecasts.values()), statistics.pstdev(forecasts.values())
+            for threshold in _METRIC_THRESHOLDS[metric]:
+                probability = event_probability(metric, list(forecasts.values()), "greater", threshold, None)
+                record = CalibrationRecord(
+                    domain="weather", venue="open_meteo_skill", market_id=f"{metric}-{code}-{target}-GT-{threshold}",
+                    question=f"{metric} at {code} on {target} greater than {threshold}",
+                    decision_timestamp=_run_available_at(run), resolution_timestamp=f"{target}T23:59:59+00:00",
+                    oracle_prob=max(0.0, min(1.0, probability)), outcome=int(actual > threshold),
+                    bucket=probability_bucket(probability), source_run=run, source_available_at=_run_available_at(run),
+                    target_date=target,
+                )
+                records.append(record)
+            raw_rows.append({"station": code, "target": target, "refused": False, "forecasts": forecasts,
+                             "historical_reanalysis": actual, "validation_scope": "forecast skill, not venue settlement"})
+    return records, raw_rows

@@ -8,7 +8,7 @@ tennis/NBA sources, head-to-head YES-side binding)
 Done this session (each verified live before commit):
 
 - Parser unit tests (closes Remaining item 1): the first tests in the repo —
-  stdlib `unittest`, run with `python3 -m unittest discover`. 61 offline tests
+  stdlib `unittest`, run with `python3 -m unittest discover`. 68 offline tests
   pin the family/shape/status contract of `parsers.py` across economics
   (Kalshi KXCPIYOY/KXECONSTATCPI/KXGDP/KXU3/KXPAYROLLS/KXFED and Limitless
   free-text CPI/GDP/Fed), World Cup stage titles, weather series/station
@@ -137,15 +137,22 @@ Remaining (next session, in this order):
    official GDPNow workbook does provide `TrackingDeepArchives`,
    `TrackingArchives`, and `TrackRecord`; both shapes are parsed and TrackRecord
    forecasts are scored against BEA advance estimates. Cleveland remains
-   source-blocked. Confidence caps remain unchanged pending an explicit
-   calibration-based cap policy rather than being raised automatically.
+   source-blocked. Grouped walk-forward evaluation keeps correlated thresholds
+   together: GDPNow has 237 test groups, Brier 0.0721 and max reliability gap
+   0.0893, supporting a measured cap increase 0.65 -> 0.70. CPI caps remain
+   unchanged (history-only recalibration worsened and does not test Cleveland);
+   annual GDP SPF remains unchanged with only two walk-forward test groups.
 7. PPI engine: no open PPI markets existed on 2026-07-09 (KXUSPPI empty);
    add the BLS `wp` flat-file/API reader when live markets return.
 8. Recession routing: wire `compute_recession_quarter_probability` into the
    scanner when a live market's rule is a decline-in-quarter test (the
    Polymarket 2026-recession market is NBER-shaped -> stays source_missing).
-9. Limitless daily weather markets: none live on 2026-07-09; when one
-   appears with station/date/strike, add the Limitless weather parser path.
+9. Limitless daily weather markets: no qualifying live market existed on
+   2026-07-09. DONE for the parser/engine boundary: Limitless and other venues
+   can supply normalized metric/coordinates/timezone/date/strike/location and
+   a recognized NOAA/NWS/Open-Meteo settlement authority; incomplete prose
+   still fails closed. A real Limitless settlement test remains pending until
+   such a market actually appears.
 10. Non-US CPI (China/Korea/etc.): official sources (NBS/KOSIS) not wired;
     stays source_missing.
 11. Sports beyond the World Cup:
@@ -162,8 +169,9 @@ Remaining (next session, in this order):
     - ClubElo — DONE for club-soccer head-to-head: dated CSV reader, exact team
       matching, fail-closed YES binding, and Elo probability are wired. It is
       capped below actionable because draw/home-field effects are not modeled;
-      outrights remain model_missing. The endpoint timed out on the 2026-07-10
-      recheck after returning HTTP 200 on 2026-07-09, so live calls fail closed.
+      outrights remain model_missing. After an initial 2026-07-10 timeout, the
+      hardened protocol/date fallback returned 592 current-day clubs in 4.27s
+      and persisted the verified snapshot; outages still fail closed.
     - MLB StatsAPI — DONE for head-to-head: 1,420 completed 2026 regular-season
       games/30 teams verified live; current-season Elo replay, parser, scanner
       route, and fail-closed YES binding are wired. Pitcher/lineup/park effects
@@ -387,8 +395,9 @@ Known support boundary:
 
 Completion criteria:
 
-- Add a Limitless weather parser once a live Limitless weather market provides
-  structured-enough settlement fields, and prove it with Phase 8 or a new gate.
+- Exercise the normalized Limitless weather parser against a real live market
+  once one exposes complete settlement fields; the parser and source-backed
+  Phase 9 probes are already wired.
 - Add exact Limitless fee calculation from official fee/profile/order rules.
 - Add new deterministic economics/sports engines before widening Limitless
   actionable support beyond US headline CPI and World Cup outright shapes.
@@ -406,11 +415,12 @@ probability engine exists.
 Known gap: broad inclusion is not the same as broad pricing. The next engine
 work should be added family by family, with verification per family:
 
-- Weather: parse any venue's location/date/metric/strike into the existing
-  weather engine before widening sports. The structured parser layer exists
-  for Kalshi high-temperature markets and recognizes low/rain/snow/wind as
-  explicit missing metric families; fixing weather coverage remains the
-  priority whenever a real non-Kalshi weather market is available.
+- Weather: high/low temperature, rain, snow, maximum wind, and maximum gust
+  engines are wired. Archived rain/snow/wind forecasts are scored against
+  historical reanalysis; rain/snow use a zero-inflated hurdle model. Kalshi's
+  40 high/low series have verified station binding. Other venues require a
+  strict normalized location/date/metric/strike/source contract. Remaining:
+  a real qualifying Limitless market and venue-specific settlement proof.
 - Economics: US annual headline CPI is now priced from BLS CPI-U history.
   Headline CPI monthly, non-US CPI, GDP, Fed-rate path/decision, recession,
   PPI, and labor markets each still need source-backed engines.

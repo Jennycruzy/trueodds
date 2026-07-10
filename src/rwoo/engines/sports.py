@@ -833,6 +833,11 @@ def compute_club_soccer_match_probability(team_a: str, team_b: str) -> dict:
         rows = clubelo.fetch_club_elo()
     except Exception as exc:  # noqa: BLE001
         return _tennis_refusal(f"ClubElo unavailable: {exc}", team_a, team_b, "clubelo_source_unavailable")
-    return _rated_match_result(team_a, team_b, rows, "ClubElo",
-                               "dated ClubElo ratings -> Elo win expectation; draw/home-field effects omitted",
-                               confidence_cap=0.54)
+    age = max((row.get("source_age_days", 0) for row in rows), default=0)
+    cap = max(0.35, 0.54 - 0.015 * age)
+    result = _rated_match_result(team_a, team_b, rows, "ClubElo",
+                                 "dated ClubElo ratings -> Elo win expectation; draw/home-field effects omitted",
+                                 confidence_cap=cap)
+    result.setdefault("per_source_values", {})["clubelo_snapshot_age_days"] = age
+    result["method"] += f"; snapshot age {age} day(s), confidence cap {cap:.3f}"
+    return result

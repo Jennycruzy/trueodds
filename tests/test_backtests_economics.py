@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from rwoo.backtests import economics
-from rwoo.calibration import CalibrationRecord
+from rwoo.calibration import CalibrationRecord, grouped_walk_forward
 from rwoo.economic_sources import SpfProbabilityRow
 
 
@@ -63,6 +63,20 @@ class EconomicsNoLookaheadTests(unittest.TestCase):
         )[0]
         self.assertFalse(check["passed"])
         self.assertIn("unparseable", check["reason"])
+
+    def test_grouped_walk_forward_counts_source_target_groups(self):
+        records = []
+        for index in range(10):
+            for threshold in range(3):
+                records.append(self._record(source=f"2024-01-{index + 1:02d}",
+                    decision=f"2024-01-{index + 1:02d}", resolution="2025-01-31").__class__(
+                    **{**self._record().__dict__, "market_id": f"{index}-{threshold}",
+                       "decision_timestamp": f"2024-01-{index + 1:02d}",
+                       "source_available_at": f"2024-01-{index + 1:02d}",
+                       "source_run": f"run-{index}", "target_date": f"2024Q{index}"}))
+        result = grouped_walk_forward(records, min_train_groups=4)
+        self.assertEqual(result["independent_groups"], 10)
+        self.assertEqual(result["test_groups"], 6)
 
 
 if __name__ == "__main__":

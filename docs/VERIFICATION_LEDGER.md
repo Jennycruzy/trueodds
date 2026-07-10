@@ -403,7 +403,42 @@ Recorded here to close the source-provenance gap for the engines added in the 20
   engine fails closed and remains below actionable confidence because draw and
   home-field effects are not modeled. Club outrights are not supported.
 
+## 25. Grouped calibration, ClubElo resilience, and weather breadth — 2026-07-10
+
+- **Grouped economics evaluation:** thresholds sharing a source run and target
+  are one walk-forward group. Exact live-model GDPNow parity produced 245
+  independent groups/237 test groups, Brier 0.0721, and maximum reliability
+  gap 0.0893; the quarterly GDP cap moved 0.65 -> 0.70. Monthly/annual CPI
+  history baselines worsened under walk-forward recalibration and cannot test
+  Cleveland, so 0.72 was not raised. Annual SPF GDP has only two test groups.
+- **ClubElo:** bounded HTTPS/HTTP and prior-date attempts, dated disk snapshots,
+  a five-minute circuit breaker, 14-day maximum stale fallback, explicit age,
+  and 0.015/day confidence decay are implemented. A source outage no longer
+  blocks every scan or silently presents stale ratings as current.
+  Live validation after the earlier timeout returned 592 current-day clubs in
+  4.27 seconds and persisted the snapshot.
+- **Weather correction:** archived calibration previously always aggregated
+  daily maximum temperature even while iterating low-temperature series. The
+  reader is now metric-aware. Daily high/low, precipitation, snowfall, maximum
+  wind, and maximum gust use matching archived variables and units.
+- **Zero-bounded correction:** an all-zero July snowfall ensemble initially
+  exposed a 42% positive-tail probability under the old symmetric normal
+  approximation. Rain/snow now use a hurdle distribution with explicit dry
+  mass and a conditional positive-amount distribution. Live recheck moved the
+  >0.1-inch snow probability to about 0.01. The engine also enforces the invariant
+  `prob_low <= oracle_prob <= prob_high`.
+- **Live source check:** NYC previous-day archived runs returned three models
+  for low temperature, rain, snow, wind, and gusts, each with a matching
+  historical value. Compact skill checks built 12 records each for rain, snow,
+  wind, and gusts with zero refused days. These validate forecast skill against
+  Open-Meteo reanalysis, not venue settlement.
+- **Venue binding:** non-Kalshi weather pricing requires normalized metric,
+  coordinates, timezone, target date, strike, location, and a named recognized
+  NOAA/NWS/Open-Meteo authority. No qualifying live Limitless weather market
+  has appeared, so the live venue-settlement condition remains pending rather
+  than being fabricated.
+
 ---
 
 ### Ledger status as of 2026-07-10 (Phase 6 + pre-listing hardening + parser/headline-CPI scanner expansion + Phase 9 coverage gate + tennis/NBA sources complete)
-All GATE 0–9-required facts are verified with real evidence above, including a real, correctly-verified X Layer mainnet anchor transaction (§16.1) after catching and fixing a genuine false-positive in the anchor verification logic itself, the 2026-07-09 engine-breadth economics/weather/FIFA sources (§23), and the 2026-07-10 tennis/NBA source reassessment (§22). Other open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the Kalshi fee-schedule PDF direct fetch blocked by HTTP 429 from this workspace, exact Limitless fee/execution support (§21), tennis tournament-winner and NBA champion simulations (§22), the economics no-lookahead backtests for the newer families (§23), the not-yet-wired ClubElo/MLB sources, future weather/economics/sports venue expansion, funded execution/risk controls, and the hosted public calibration page.
+All GATE 0–9-required facts are verified with real evidence above, including a real, correctly-verified X Layer mainnet anchor transaction (§16.1) after catching and fixing a genuine false-positive in the anchor verification logic itself, the 2026-07-09 engine-breadth economics/weather/FIFA sources (§23), and the 2026-07-10 grouped calibration and source expansions (§24–25). Other open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the Kalshi fee-schedule PDF direct fetch blocked by HTTP 429 from this workspace, exact Limitless fee/execution support (§21), tennis tournament-winner and NBA champion simulations (§22), Cleveland historical-nowcast validation, a real structured Limitless weather settlement test, secondary club-soccer results replay, funded execution/risk controls, and the hosted public calibration page.

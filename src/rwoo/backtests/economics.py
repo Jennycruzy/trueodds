@@ -14,7 +14,7 @@ from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
-from rwoo.calibration import CalibrationRecord, probability_bucket
+from rwoo.calibration import CalibrationRecord, grouped_walk_forward, probability_bucket
 from rwoo import economic_sources
 from rwoo.engines.economics import (
     compute_core_cpi_probability,
@@ -310,7 +310,10 @@ def build_gdpnow_quarterly_backtest() -> tuple[list[CalibrationRecord], list[dic
         sigma = max(0.5, statistics.pstdev(path) if len(path) > 1 else 1.0)
         for threshold in thresholds:
             z = (threshold - row.nowcast) / sigma
-            probability = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+            tight = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+            wide_z = (threshold - row.nowcast) / (2 * sigma)
+            wide = 1.0 - 0.5 * (1.0 + math.erf(wide_z / math.sqrt(2.0)))
+            probability = statistics.fmean((tight, wide))
             result = {"refused": False, "oracle_prob": probability, "source_available_at": row.forecast_date.isoformat(),
                       "validation_scope": "official archived GDPNow forecast versus BEA advance estimate"}
             raw_rows.append({"source": "atlanta_fed_gdpnow_track_record", "forecast": row, "engine_result": result})
@@ -412,3 +415,14 @@ def economics_no_lookahead_checks(records: list[CalibrationRecord]) -> list[dict
             reason = f"unparseable timestamp: {exc}"
         checks.append({"market_id": record.market_id, "passed": passed, "reason": reason})
     return checks
+
+
+def economics_walk_forward_report(records: list[CalibrationRecord]) -> dict[str, dict]:
+    families = {
+        "headline_cpi_monthly_history": lambda r: r.market_id.startswith("BLS-HEADLINE-MONTHLY-"),
+        "headline_cpi_annual_history": lambda r: r.market_id.startswith("BLS-HEADLINE-ANNUAL-"),
+        "annual_gdp_spf": lambda r: r.market_id.startswith("SPF-PRGDP-"),
+        "quarterly_gdpnow": lambda r: r.market_id.startswith("GDPNOW-"),
+    }
+    return {name: grouped_walk_forward([r for r in records if predicate(r)])
+            for name, predicate in families.items()}

@@ -258,6 +258,30 @@ def parse_weather_market(market) -> ParsedMarket:
         if parsed is not None:
             return parsed
 
+    structured = market.raw.get("weather") if isinstance(market.raw, dict) else None
+    if isinstance(structured, dict):
+        def field(*names):
+            return next((structured[name] for name in names if structured.get(name) not in (None, "")), None)
+        metric = field("metric", "weatherMetric", "variable")
+        latitude, longitude = field("latitude", "lat"), field("longitude", "lon", "lng")
+        timezone_name, target_date = field("timezone", "timezoneName"), field("target_date", "targetDate", "date")
+        strike_type = field("strike_type", "strikeType")
+        location = field("location", "station", "stationName")
+        source = str(field("settlement_source", "settlementSource") or market.resolution_source or "")
+        source_verified = bool(re.search(r"\b(NOAA|NWS|National Weather Service|Open-Meteo)\b", source, re.I))
+        required = (metric, latitude, longitude, timezone_name, target_date, strike_type, location, source_verified)
+        if metric in WEATHER_ENGINE_METRICS and all(value not in (None, "", False) for value in required):
+            return ParsedMarket(
+                domain="weather", family=_family_for_weather_metric(metric), shape=_shape_for_weather_metric(metric),
+                status="engine_available", reason="venue supplied complete normalized weather metadata",
+                metric=metric, location=location, target_date=target_date,
+                timezone_name=timezone_name, strike_type=strike_type,
+                floor_strike=_float_or_none(field("floor_strike", "floorStrike", "threshold")),
+                cap_strike=_float_or_none(field("cap_strike", "capStrike")), settlement_source=source,
+                raw={"lat": float(latitude), "lon": float(longitude),
+                     "venue_weather": structured},
+            )
+
     text = " ".join(part for part in (market.question, market.resolution_rule) if part)
     metric = _weather_metric_from_text(text)
     if metric is not None:
@@ -647,6 +671,8 @@ def _family_for_weather_metric(metric: str) -> str:
         return "weather.temperature"
     if metric in ("precipitation_sum", "snowfall_sum"):
         return "weather.precipitation"
+    if metric.startswith("wind_"):
+        return "weather.wind"
     return "weather"
 
 
@@ -660,7 +686,11 @@ def _weather_metric_from_text(text: str) -> str | None:
         return "precipitation_sum"
     if re.search(r"\b(snowfall|snow)\b", lowered):
         return "snowfall_sum"
-    if re.search(r"\b(wind speed|wind gust|hurricane|storm)\b", lowered):
+    if re.search(r"\b(wind gust|wind gusts|maximum gust)\b", lowered):
+        return "wind_gusts_10m_max"
+    if re.search(r"\b(wind speed|maximum wind|sustained wind)\b", lowered):
+        return "wind_speed_10m_max"
+    if re.search(r"\b(hurricane|storm)\b", lowered):
         return "wind_or_storm"
     return None
 
@@ -674,6 +704,8 @@ def _shape_for_weather_metric(metric: str) -> str:
         return "daily_rain_threshold"
     if metric == "snowfall_sum":
         return "daily_snow_threshold"
+    if metric in {"wind_speed_10m_max", "wind_gusts_10m_max"}:
+        return "daily_wind_threshold"
     if metric == "wind_or_storm":
         return "wind_or_storm_threshold"
     return "unknown_weather_metric"

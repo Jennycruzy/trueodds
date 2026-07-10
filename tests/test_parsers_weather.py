@@ -6,8 +6,10 @@ event ticker; unmapped or unregistered series surface explicit missing statuses.
 Also covers the free-text metric classifier used for non-Kalshi venues.
 """
 import unittest
+from unittest.mock import patch
 
 from rwoo.parsers import parse_market
+from rwoo.engines.weather import compute_weather_probability, event_probability
 from tests.support import kalshi_raw, make_market
 from rwoo.weather_stations import station_for_series
 
@@ -85,17 +87,41 @@ class FreeTextWeatherMetricTests(unittest.TestCase):
         self.assertEqual(parsed.metric, "snowfall_sum")
         self.assertEqual(parsed.status, "parse_missing")
 
-    def test_wind_text_is_model_missing(self):
+    def test_wind_text_engine_exists_but_is_unstructured(self):
         parsed = self._text("Will wind gusts exceed 50 mph during the storm?")
-        self.assertEqual(parsed.metric, "wind_or_storm")
-        self.assertEqual(parsed.shape, "wind_or_storm_threshold")
-        # no wind engine wired -> model_missing
-        self.assertEqual(parsed.status, "model_missing")
+        self.assertEqual(parsed.metric, "wind_gusts_10m_max")
+        self.assertEqual(parsed.shape, "daily_wind_threshold")
+        self.assertEqual(parsed.status, "parse_missing")
+
+    def test_structured_limitless_weather_routes_to_engine(self):
+        market = make_market(venue="limitless", domain="weather", question="NYC wind gust")
+        market.raw["weather"] = {"metric": "wind_gusts_10m_max", "latitude": 40.7789,
+            "longitude": -73.9692, "timezone": "America/New_York", "target_date": "2026-07-12",
+            "strike_type": "greater", "floor_strike": 40, "location": "Central Park",
+            "settlement_source": "National Weather Service"}
+        parsed = parse_market(market)
+        self.assertEqual((parsed.family, parsed.status), ("weather.wind", "engine_available"))
+        self.assertEqual(parsed.raw["lat"], 40.7789)
 
     def test_unparseable_weather_text(self):
         parsed = self._text("Will the weather be pleasant this weekend?")
         self.assertEqual(parsed.shape, "unparsed_weather")
         self.assertEqual(parsed.status, "parse_missing")
+
+    def test_zero_snow_ensemble_has_near_zero_positive_tail(self):
+        probability = event_probability("snowfall_sum", [0.0, 0.0, 0.0], "greater", 0.1, None)
+        self.assertLess(probability, 0.02)
+
+    def test_dry_mass_is_included_in_less_than_event(self):
+        probability = event_probability("precipitation_sum", [0.0, 0.0, 0.2], "less", None, 0.1)
+        self.assertGreater(probability, 0.70)
+
+    @patch("rwoo.engines.weather.fetch_model_forecasts", return_value={"a": 0.0, "b": 0.0, "c": 0.0})
+    def test_oracle_probability_is_inside_uncertainty_band(self, _fetch):
+        result = compute_weather_probability(0, 0, "2026-07-12", "UTC", "greater", 0.1, None,
+                                             include_base_rate=False, metric="snowfall_sum")
+        self.assertLessEqual(result["prob_low"], result["oracle_prob"])
+        self.assertLessEqual(result["oracle_prob"], result["prob_high"])
 
 
 if __name__ == "__main__":

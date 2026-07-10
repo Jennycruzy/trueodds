@@ -228,6 +228,10 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
         "collateralToken": market.get("collateralToken") or (parent or {}).get("collateralToken"),
         "fee_metadata": (market.get("metadata") or {}).get("fee"),
     }
+    metadata = market.get("metadata") or {}
+    weather = metadata.get("weather") or market.get("weather")
+    if isinstance(weather, dict):
+        raw["weather"] = weather
     if supported_shape:
         raw["limitless_supported_shape"] = supported_shape
 

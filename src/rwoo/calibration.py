@@ -7,6 +7,7 @@ reliability buckets and Brier score every time. No model or LLM participates.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 
 @dataclass(frozen=True)
@@ -145,3 +146,37 @@ def fit_power_recalibration(records: list[CalibrationRecord]) -> dict:
         "improved": best_brier < original_brier,
         "details": details,
     }
+
+
+def grouped_walk_forward(records: list[CalibrationRecord], min_train_groups: int = 8,
+                         min_test_groups: int = 20) -> dict:
+    """Walk-forward power calibration with correlated thresholds kept together.
+
+    A group is one source run for one target. Gamma is fitted only on earlier
+    groups, then scored on the next group. Reported sample size is independent
+    groups, while row count remains visible for auditability.
+    """
+    groups: dict[tuple[str, str], list[CalibrationRecord]] = {}
+    for record in records:
+        groups.setdefault((record.source_run, record.target_date), []).append(record)
+    ordered = sorted(groups.values(), key=lambda g: datetime.fromisoformat(g[0].decision_timestamp.replace("Z", "+00:00")))
+    folds = []
+    for index in range(min_train_groups, len(ordered)):
+        train = [record for group in ordered[:index] for record in group]
+        test = ordered[index]
+        fit = fit_power_recalibration(train)
+        gamma = fit["gamma"]
+        original = sum((r.oracle_prob - r.outcome) ** 2 for r in test) / len(test)
+        recalibrated = sum((_power_transform(r.oracle_prob, gamma) - r.outcome) ** 2 for r in test) / len(test)
+        folds.append({"group": (test[0].source_run, test[0].target_date), "rows": len(test),
+                      "gamma": gamma, "original_brier": original, "recalibrated_brier": recalibrated})
+    if not folds:
+        return {"independent_groups": len(ordered), "rows": len(records), "folds": [], "eligible": False,
+                "reason": f"need more than {min_train_groups} independent groups"}
+    original = sum(f["original_brier"] for f in folds) / len(folds)
+    recalibrated = sum(f["recalibrated_brier"] for f in folds) / len(folds)
+    eligible = len(folds) >= min_test_groups
+    return {"independent_groups": len(ordered), "rows": len(records), "test_groups": len(folds),
+            "original_brier": original, "recalibrated_brier": recalibrated,
+            "improved": recalibrated < original, "folds": folds, "eligible": eligible,
+            "reason": None if eligible else f"need at least {min_test_groups} walk-forward test groups"}
