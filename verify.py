@@ -1058,7 +1058,10 @@ def phase_5():
     print("Every real settled KXCPICORE market, scored using ONLY BLS values whose")
     print("real publication date (not calendar month) was public by decision time,")
     print("plus official Philadelphia Fed SPF probability distributions scored")
-    print("against realized BLS Q4/Q4 core CPI. The BLS API is still tried first,")
+    print("against realized BLS Q4/Q4 core CPI and BEA annual GDP. Headline CPI")
+    print("monthly/annual records are history-only current-vintage BLS baselines;")
+    print("they do NOT validate the Cleveland Fed forward-nowcast confidence cap.")
+    print("The BLS API is still tried first,")
     print("but the official BLS flat-file mirror is used as a quota-free fallback.\n")
     try:
         economics_records, economics_raw_rows = economics_backtest.build_economics_backtest()
@@ -1068,16 +1071,24 @@ def phase_5():
         failures.append("economics backtest")
 
     if economics_records:
-        spf_count = sum(1 for record in economics_records if record.venue == "philadelphia_fed_spf")
+        spf_core_count = sum(1 for record in economics_records if record.market_id.startswith("SPF-PRCCPI-"))
+        spf_gdp_count = sum(1 for record in economics_records if record.market_id.startswith("SPF-PRGDP-"))
+        cpi_monthly_count = sum(1 for record in economics_records if record.market_id.startswith("BLS-HEADLINE-MONTHLY-"))
+        cpi_annual_count = sum(1 for record in economics_records if record.market_id.startswith("BLS-HEADLINE-ANNUAL-"))
+        gdpnow_count = sum(1 for record in economics_records if record.market_id.startswith("GDPNOW-"))
         kalshi_count = sum(1 for record in economics_records if record.venue == "kalshi")
         print(
             f"Built {len(economics_records)} economics calibration records "
-            f"({kalshi_count} Kalshi CPI markets, {spf_count} official SPF probability-bin records).\n"
+            f"({kalshi_count} Kalshi core-CPI markets, {spf_core_count} SPF core-CPI bins, "
+            f"{spf_gdp_count} SPF annual-GDP bins, {cpi_monthly_count} monthly and "
+            f"{cpi_annual_count} annual headline-CPI history baselines, and {gdpnow_count} "
+            "archived GDPNow threshold records).\n"
         )
         print("Real economics calibration records sampled from the built record set:")
         sample_records = [
             *[record for record in economics_records if record.venue == "kalshi"][:4],
-            *[record for record in economics_records if record.venue == "philadelphia_fed_spf"][:4],
+            *[record for record in economics_records if record.market_id.startswith("SPF-PRGDP-")][:2],
+            *[record for record in economics_records if record.venue == "bls_history_baseline"][:2],
         ]
         for idx, record in enumerate(sample_records, start=1):
             print(
@@ -1099,15 +1110,18 @@ def phase_5():
     econ_no_lookahead_ok = False
     if economics_records:
         hdr("ECONOMICS — NO-LOOKAHEAD PROOF")
-        print("Enforced inside the backtest builder itself (not a display-time check):")
-        print("each record's BLS history is filtered to release_date <= decision_date using")
-        print("the real BLS release-date table, AND the record is refused outright if the")
-        print("target month's own release had already happened by decision time.")
-        sample = economics_raw_rows[0]["engine_result"] if economics_raw_rows else {}
-        if sample.get("source_available_at"):
-            print(f"Example: {sample.get('source_available_at')}")
-        econ_no_lookahead_ok = True
-        print("  [PASS] no-lookahead enforced structurally for every built record")
+        print("Checking every built economics record, not merely the existence of records:")
+        print("source_available_at <= decision_timestamp < resolution_timestamp.")
+        econ_checks = economics_backtest.economics_no_lookahead_checks(economics_records)
+        failed_econ_checks = [row for row in econ_checks if not row["passed"]]
+        econ_no_lookahead_ok = bool(econ_checks) and not failed_econ_checks
+        print(f"Checked {len(econ_checks)} economics records; failures={len(failed_econ_checks)}.")
+        for row in failed_econ_checks[:5]:
+            print(f"  FAIL {row['market_id']}: {row['reason']}")
+        print(
+            f"  [{'PASS' if econ_no_lookahead_ok else 'FAIL'}] every economics record has a dated "
+            "source cutoff before resolution"
+        )
 
     if economics_records:
         econ_curve, econ_brier, econ_gap, econ_recal_ok = _score_domain("economics", economics_records)

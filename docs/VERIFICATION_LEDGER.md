@@ -367,7 +367,41 @@ Recorded here to close the source-provenance gap for the engines added in the 20
 - **FOMC meeting calendar:** `https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm` (`fetch_fomc_meeting_dates`). The fed-rate engine prices a target-range market **only** when no scheduled FOMC meeting remains before the market's date, and refuses otherwise — there is no wired forward-looking rate-path (fed funds futures) source.
 - **Atlanta Fed GDPNow workbook:** `https://www.atlantafed.org/-/media/Project/Atlanta/FRBA/Documents/cqer/researchcq/gdpnow/GDPTrackingModelDataAndForecasts.xlsx` — the `TrackingHistory` sheet, current-quarter QoQ SAAR nowcast and its full path; row layout verified live 2026-07-09 (`fetch_gdpnow_current`). Dollar-level rows are filtered from the growth path; the engine refuses if the workbook's current quarter does not match the market's quarter.
 - **Official FIFA match calendar (live bracket):** `GET https://api.fifa.com/api/v3/calendar/matches?idCompetition=17&idSeason=285023` — live played results, winners/losers, and PlaceHolder-based bracket slots. Season `285023` confirmed via `GET https://api.fifa.com/api/v3/seasons?idCompetition=17` listing it as "FIFA World Cup 2026™", verified live mid-tournament 2026-07-09. World Cup pricing now conditions on this real bracket state; the rankings-only model had called an actionable edge against a team still alive in the semifinal bracket.
-- **Gap:** SPF PRGDP/PRUNEMP/RECESS bins are pinned to the 2024:Q2 documentation era and must be refreshed if the official bin definitions change; the economics no-lookahead backtests for the newer families (headline CPI monthly/annual, GDP) are still open, so their confidence caps stay conservative until those backtests exist.
+- **Backtest follow-up, 2026-07-10:** official SPF PRGDP densities are now
+  scored against BEA annual-average real-GDP growth (FRED series
+  `A191RL1A225NBEA`, the same annual-average-over-annual-average definition).
+  Headline CPI monthly/annual rolling records are explicitly labeled
+  history-only, current-vintage BLS baselines: they exclude the Cleveland Fed
+  source and do not validate or raise its forward-source confidence cap.
+  Phase 5 now checks parseable source/decision/resolution timestamps on every
+  economics record instead of treating any nonempty record set as proof.
+- **Historical-vintage finding, 2026-07-10:** the Cleveland Fed's official
+  Inflation Nowcasting page says a long real-time history of this particular
+  series is unavailable. By contrast, the Atlanta Fed's official GDPNow page
+  documents historical forecasts in the workbook's `TrackingDeepArchives`
+  (2011:Q3-2014:Q1), `TrackingArchives` (2014:Q2 onward), and `TrackRecord`
+  (forecasts versus BEA advance estimates). Archived GDPNow calibration is
+  therefore actionable; Cleveland-forward calibration remains source-blocked.
+- **Remaining gap:** SPF PRGDP/PRUNEMP/RECESS bins are pinned to the 2024:Q2
+  documentation era and must be refreshed if the official bin definitions
+  change. Quarterly GDPNow archive calibration is not wired yet, and no CPI
+  history-only result may be represented as Cleveland-nowcast validation.
+
+## 24. GDPNow archive, MLB StatsAPI, and ClubElo wiring — 2026-07-10
+
+- **GDPNow:** the official workbook's named `TrackRecord` columns produced 245
+  dated forecasts with BEA advance estimates; `TrackingArchives` is also
+  parsed as its transposed quarter-evolution shape. Calibration uses forecast
+  date as source/decision cutoff and BEA publication date as resolution.
+- **MLB:** official StatsAPI returned 30 teams and 1,420 finalized 2026 regular
+  season games. Results replay into current-season Elo. Only match winners
+  with an unambiguous YES team are supported; pitcher, lineup, park, prop,
+  parlay, and futures effects are not claimed.
+- **ClubElo:** the dated public CSV endpoint was verified HTTP 200 on
+  2026-07-09. Reader/engine/parser/scanner support is wired for head-to-head
+  club matches, but the endpoint timed out on the 2026-07-10 recheck. The
+  engine fails closed and remains below actionable confidence because draw and
+  home-field effects are not modeled. Club outrights are not supported.
 
 ---
 

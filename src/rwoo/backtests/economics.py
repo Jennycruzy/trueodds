@@ -8,14 +8,25 @@ No sample-size cap — every real settled KXCPICORE market is attempted.
 from __future__ import annotations
 
 import time
-from datetime import date, datetime, timezone
+import math
+import statistics
+from datetime import date, datetime, timedelta, timezone
 
 import httpx
 
 from rwoo.calibration import CalibrationRecord, probability_bucket
 from rwoo import economic_sources
-from rwoo.engines.economics import compute_core_cpi_probability, release_date_for
-from rwoo.engines.economics import fetch_core_cpi_series
+from rwoo.engines.economics import (
+    compute_core_cpi_probability,
+    compute_headline_cpi_annual_probability,
+    compute_headline_cpi_monthly_probability,
+    fetch_core_cpi_series,
+    fetch_headline_cpi_sa_series,
+    fetch_headline_cpi_series,
+    month_over_month_changes,
+    release_date_for,
+    year_over_year_changes,
+)
 from rwoo.readers import kalshi
 
 _MONTH_ABBR = {
@@ -93,9 +104,17 @@ def compute_archived_cpi_probability(market: dict) -> dict:
     if result.get("refused"):
         return result
 
+    included_rows = fetch_core_cpi_series(as_of=decision_date)
+    included_release_dates = [
+        release_date_for(row["year"], row["month"])
+        for row in included_rows
+        if release_date_for(row["year"], row["month"]) is not None
+    ]
+    if not included_release_dates:
+        return {"refused": True, "reason": "no dated BLS observations were public by decision time"}
     result["decision_timestamp"] = decision_timestamp
     result["target_month"] = f"{target_year}-{target_month:02d}"
-    result["source_available_at"] = f"all included BLS values released on/before {decision_date.isoformat()}"
+    result["source_available_at"] = max(included_release_dates).isoformat()
     return result
 
 
@@ -130,6 +149,16 @@ def build_economics_backtest(series_ticker: str = "KXCPICORE") -> tuple[list[Cal
     spf_records, spf_raw_rows = build_spf_core_cpi_backtest()
     records.extend(spf_records)
     raw_rows.extend(spf_raw_rows)
+    gdp_records, gdp_raw_rows = build_spf_annual_gdp_backtest()
+    records.extend(gdp_records)
+    raw_rows.extend(gdp_raw_rows)
+    gdpnow_records, gdpnow_raw_rows = build_gdpnow_quarterly_backtest()
+    records.extend(gdpnow_records)
+    raw_rows.extend(gdpnow_raw_rows)
+    for builder in (build_headline_cpi_monthly_baseline, build_headline_cpi_annual_baseline):
+        baseline_records, baseline_raw_rows = builder()
+        records.extend(baseline_records)
+        raw_rows.extend(baseline_raw_rows)
     return records, raw_rows
 
 
@@ -211,3 +240,175 @@ def build_spf_core_cpi_backtest() -> tuple[list[CalibrationRecord], list[dict]]:
                 )
             )
     return records, raw_rows
+
+
+def _bin_contains(bounds: tuple[float | None, float | None, str], value: float) -> bool:
+    low, high, _label = bounds
+    if low is None:
+        return value < float(high)
+    if high is None:
+        return value >= low
+    return low <= value <= high
+
+
+def build_spf_annual_gdp_backtest() -> tuple[list[CalibrationRecord], list[dict]]:
+    """Score dated SPF PRGDP densities against realized annual real-GDP growth.
+
+    PRGDP and FRED/BEA series A191RL1A225NBEA use the same annual-average over
+    annual-average definition. Only the decoded 2024:Q2+ SPF bin regime is
+    used. These records validate the SPF annual-GDP density path, not GDPNow.
+    """
+    actuals = {d.year: value for d, value in economic_sources.fetch_fred_series("A191RL1A225NBEA")}
+    records: list[CalibrationRecord] = []
+    raw_rows: list[dict] = []
+    for row in economic_sources.fetch_spf_density_rows("PRGDP"):
+        actual = actuals.get(row.target_year)
+        if actual is None:
+            raw_rows.append({
+                "source": "philadelphia_fed_spf_prgdp",
+                "spf_row": row,
+                "engine_result": {"refused": True, "reason": f"no realized annual GDP for {row.target_year}"},
+            })
+            continue
+        resolution = date(row.target_year + 1, 1, 31)
+        for idx, probability in enumerate(row.probabilities):
+            label = economic_sources.SPF_PRGDP_BINS[idx][2]
+            result = {
+                "refused": False,
+                "oracle_prob": probability,
+                "actual_annual_real_gdp_growth": actual,
+                "source_available_at": row.source_available_at,
+                "validation_scope": "SPF annual-GDP density only; does not validate GDPNow",
+            }
+            raw_rows.append({"source": "philadelphia_fed_spf_prgdp", "spf_row": row, "bin": label, "engine_result": result})
+            records.append(CalibrationRecord(
+                domain="economics",
+                venue="philadelphia_fed_spf",
+                market_id=f"SPF-PRGDP-{row.survey_year}Q{row.survey_quarter}-{row.horizon}-BIN{idx + 1}",
+                question=f"Annual-average real GDP growth in {row.target_year}: {label}",
+                decision_timestamp=row.source_available_at,
+                resolution_timestamp=resolution.isoformat(),
+                oracle_prob=probability,
+                outcome=int(_bin_contains(economic_sources.SPF_PRGDP_BINS[idx], actual)),
+                bucket=probability_bucket(probability),
+                source_run=f"SPF {row.survey_year}:Q{row.survey_quarter} {row.horizon}",
+                source_available_at=row.source_available_at,
+                target_date=str(row.target_year),
+            ))
+    return records, raw_rows
+
+
+def build_gdpnow_quarterly_backtest() -> tuple[list[CalibrationRecord], list[dict]]:
+    """Score official dated GDPNow forecasts against BEA advance estimates."""
+    records, raw_rows = [], []
+    thresholds = (-2.0, 0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+    forecasts = economic_sources.fetch_gdpnow_track_record()
+    by_quarter: dict[str, list[float]] = {}
+    for row in forecasts:
+        path = by_quarter.setdefault(row.quarter_label, [])
+        path.append(row.nowcast)
+        sigma = max(0.5, statistics.pstdev(path) if len(path) > 1 else 1.0)
+        for threshold in thresholds:
+            z = (threshold - row.nowcast) / sigma
+            probability = 1.0 - 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+            result = {"refused": False, "oracle_prob": probability, "source_available_at": row.forecast_date.isoformat(),
+                      "validation_scope": "official archived GDPNow forecast versus BEA advance estimate"}
+            raw_rows.append({"source": "atlanta_fed_gdpnow_track_record", "forecast": row, "engine_result": result})
+            records.append(CalibrationRecord(
+                domain="economics", venue="atlanta_fed_gdpnow",
+                market_id=f"GDPNOW-{row.quarter_label}-{row.forecast_date}-GT-{threshold:.1f}",
+                question=f"BEA advance real GDP for {row.quarter_label} greater than {threshold:.1f}% SAAR",
+                decision_timestamp=row.forecast_date.isoformat(), resolution_timestamp=row.publication_date.isoformat(),
+                oracle_prob=probability, outcome=int(row.advance_estimate > threshold),
+                bucket=probability_bucket(probability), source_run=f"GDPNow {row.forecast_date}",
+                source_available_at=row.forecast_date.isoformat(), target_date=row.quarter_label,
+            ))
+    return records, raw_rows
+
+
+_MONTHLY_THRESHOLDS = (-0.1, 0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6)
+_ANNUAL_THRESHOLDS = (0.0, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0)
+
+
+def _build_headline_cpi_baseline(monthly: bool) -> tuple[list[CalibrationRecord], list[dict]]:
+    """Rolling history-only CPI baseline with an explicit limited claim.
+
+    The predictor is cut off the day before the target release. Current BLS
+    history is used, so SA revisions can affect the monthly inputs. No
+    Cleveland Fed nowcast is supplied when ``as_of`` is set; consequently
+    these records must never justify the live forward-source confidence cap.
+    """
+    rows = fetch_headline_cpi_sa_series() if monthly else fetch_headline_cpi_series()
+    changes = month_over_month_changes(rows) if monthly else year_over_year_changes(rows)
+    thresholds = _MONTHLY_THRESHOLDS if monthly else _ANNUAL_THRESHOLDS
+    minimum_history = 36 if monthly else 60
+    records: list[CalibrationRecord] = []
+    raw_rows: list[dict] = []
+    for target in changes:
+        release = release_date_for(target["year"], target["month"])
+        if release is None:
+            continue
+        decision = release - timedelta(days=1)
+        available_rows = [r for r in rows if (release_date_for(r["year"], r["month"]) or date.max) <= decision]
+        available_changes = month_over_month_changes(available_rows) if monthly else year_over_year_changes(available_rows)
+        if len(available_changes) < minimum_history:
+            continue
+        latest_source_release = max(release_date_for(r["year"], r["month"]) for r in available_rows)
+        for threshold in thresholds:
+            compute = compute_headline_cpi_monthly_probability if monthly else compute_headline_cpi_annual_probability
+            result = compute("greater", threshold, None, target_month=target["month"], as_of=decision)
+            result["validation_scope"] = (
+                "history-only current-vintage BLS baseline; Cleveland Fed forward source absent and not validated"
+            )
+            result["source_available_at"] = latest_source_release.isoformat()
+            raw_rows.append({"source": "bls_headline_cpi_history_baseline", "target": target, "engine_result": result})
+            if result.get("refused"):
+                continue
+            probability = result["oracle_prob"]
+            family = "monthly" if monthly else "annual"
+            records.append(CalibrationRecord(
+                domain="economics",
+                venue="bls_history_baseline",
+                market_id=f"BLS-HEADLINE-{family.upper()}-{target['year']}{target['month']:02d}-GT-{threshold:.1f}",
+                question=f"Headline CPI {family} change for {target['year']}-{target['month']:02d} greater than {threshold:.1f}%",
+                decision_timestamp=decision.isoformat(),
+                resolution_timestamp=release.isoformat(),
+                oracle_prob=probability,
+                outcome=int(target["reported_single_decimal"] > threshold),
+                bucket=probability_bucket(probability),
+                source_run="BLS history-only rolling baseline (current vintage)",
+                source_available_at=latest_source_release.isoformat(),
+                target_date=f"{target['year']}-{target['month']:02d}",
+            ))
+    return records, raw_rows
+
+
+def build_headline_cpi_monthly_baseline() -> tuple[list[CalibrationRecord], list[dict]]:
+    return _build_headline_cpi_baseline(monthly=True)
+
+
+def build_headline_cpi_annual_baseline() -> tuple[list[CalibrationRecord], list[dict]]:
+    return _build_headline_cpi_baseline(monthly=False)
+
+
+def economics_no_lookahead_checks(records: list[CalibrationRecord]) -> list[dict]:
+    """Return a timestamp proof for every economics calibration record."""
+    def parse_utc(value: str) -> datetime:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
+
+    checks = []
+    for record in records:
+        try:
+            source = parse_utc(record.source_available_at)
+            decision = parse_utc(record.decision_timestamp)
+            resolution = parse_utc(record.resolution_timestamp)
+            passed = source <= decision < resolution
+            reason = None if passed else "required source_available_at <= decision < resolution"
+        except (TypeError, ValueError) as exc:
+            passed = False
+            reason = f"unparseable timestamp: {exc}"
+        checks.append({"market_id": record.market_id, "passed": passed, "reason": reason})
+    return checks

@@ -8,7 +8,7 @@ tennis/NBA sources, head-to-head YES-side binding)
 Done this session (each verified live before commit):
 
 - Parser unit tests (closes Remaining item 1): the first tests in the repo —
-  stdlib `unittest`, run with `python3 -m unittest discover`. 54 offline tests
+  stdlib `unittest`, run with `python3 -m unittest discover`. 61 offline tests
   pin the family/shape/status contract of `parsers.py` across economics
   (Kalshi KXCPIYOY/KXECONSTATCPI/KXGDP/KXU3/KXPAYROLLS/KXFED and Limitless
   free-text CPI/GDP/Fed), World Cup stage titles, weather series/station
@@ -104,9 +104,14 @@ Remaining (next session, in this order):
 2. ~~Phase 9 coverage gate in `verify.py`~~ — DONE 2026-07-10:
    `python3 verify.py --phase 9` passes. (Its tennis/NBA checks now assert the
    priced/deferred states, not the retired `source_missing` verdict.)
-3. Regenerate `data/public/opportunity_scan_latest.*` with a full scan and
-   commit; compare coverage_status_counts against the 2026-07-09 morning
-   artifact (parse_missing 328 / model_missing 298 should drop sharply).
+3. ~~Regenerate `data/public/opportunity_scan_latest.*` with a full scan and
+   compare it with the 2026-07-09 morning artifact~~ — DONE 2026-07-10 in
+   `9fac416`. The broader scan saw 5,495 markets vs. 2,163 and included 1,334
+   vs. 915. `model_missing` fell 298 -> 249. Absolute `parse_missing` rose
+   328 -> 365 because the wider Kalshi census explicitly included 39 more
+   unsupported multigame/parlay records, but its share of included markets
+   improved from 35.8% -> 27.4%; Limitless unknown-sports parse misses also
+   fell 317 -> 308. This is broader honest inventory, not a parser regression.
 4. ~~Update `docs/VERIFICATION_LEDGER.md` with this session's verified
    sources~~ — DONE 2026-07-10: ledger §23 records the 2026-07-09
    engine-breadth sources (NWS issuedby codes + NOAA GHCND registry, Cleveland
@@ -122,9 +127,18 @@ Remaining (next session, in this order):
    instead of the pre-tournament simulator ensemble), and phase 8 requires
    real friction only on PRICED records (an honestly-refused GDP-Q3/Fed market
    has oracle_prob None and no friction, which is correct, not a cost gap).
-6. Economics backtests for the new families (the calibration moat currently
-   covers core CPI + WC outrights only): headline CPI monthly/annual and
-   GDP need no-lookahead backtests before their confidence caps are raised.
+6. ~~Economics backtests for the new families~~ — DONE 2026-07-10 for the
+   defensible available evidence:
+   annual GDP SPF calibration and explicitly history-only headline CPI
+   monthly/annual baselines are wired, with per-record timestamp checks in
+   Phase 5. These CPI baselines do NOT validate the Cleveland Fed forward
+   source or justify raising its confidence cap; Cleveland states that a long
+   real-time history of this particular nowcast series is unavailable. The
+   official GDPNow workbook does provide `TrackingDeepArchives`,
+   `TrackingArchives`, and `TrackRecord`; both shapes are parsed and TrackRecord
+   forecasts are scored against BEA advance estimates. Cleveland remains
+   source-blocked. Confidence caps remain unchanged pending an explicit
+   calibration-based cap policy rather than being raised automatically.
 7. PPI engine: no open PPI markets existed on 2026-07-09 (KXUSPPI empty);
    add the BLS `wp` flat-file/API reader when live markets return.
 8. Recession routing: wire `compute_recession_quarter_probability` into the
@@ -145,13 +159,15 @@ Remaining (next session, in this order):
       below the actionable floor. STILL OPEN: NBA champion outright needs a
       season/playoff simulation (source reachable, sim not wired ->
       model_missing).
-    - ClubElo public API (api.clubelo.com/YYYY-MM-DD, HTTP 200, no key,
-      verified 2026-07-09) -> club-soccer match winners and outrights; NOT yet
-      wired.
-    - MLB official StatsAPI (statsapi.mlb.com, HTTP 200, 30 teams, no key,
-      verified 2026-07-09; MLB is IN SEASON) -> team-rating engine from real
-      results (Elo replay like sports_elo.py) for Kalshi KXMLB moneylines;
-      NOT yet wired.
+    - ClubElo — DONE for club-soccer head-to-head: dated CSV reader, exact team
+      matching, fail-closed YES binding, and Elo probability are wired. It is
+      capped below actionable because draw/home-field effects are not modeled;
+      outrights remain model_missing. The endpoint timed out on the 2026-07-10
+      recheck after returning HTTP 200 on 2026-07-09, so live calls fail closed.
+    - MLB StatsAPI — DONE for head-to-head: 1,420 completed 2026 regular-season
+      games/30 teams verified live; current-season Elo replay, parser, scanner
+      route, and fail-closed YES binding are wired. Pitcher/lineup/park effects
+      and futures remain outside the supported shape.
     Still blocked/deferred and why: NHL (official API reachable but offseason —
     engine cannot honestly clear the confidence floor until real 2026-27
     results exist), esports (no free verified source). Player props and the
@@ -239,12 +255,13 @@ API is still tried first, but the official BLS flat-file mirror is now used as
 a quota-free fallback, so a full economics calibration run is no longer allowed
 to pass by claiming the unauthenticated BLS quota blocked it.
 
-Backtest evidence: `python3 verify.py --phase 5` now builds 1,427 economics
-calibration records: 27 real settled Kalshi CPI markets plus 1,400 official
-SPF probability-bin records scored against realized BLS Q4/Q4 core CPI. It
-prints an economics reliability curve and Brier score (`0.0550` in the latest
-run) and demonstrates deterministic recalibration only after measuring
-miscalibration.
+Backtest evidence: the focused live economics build now produces 4,620
+records: the existing 27 settled Kalshi core-CPI markets and 1,400 SPF
+core-CPI bins, plus 110 SPF annual-GDP bins, 1,123 explicitly history-only
+headline-CPI baselines, and 1,960 archived GDPNow threshold records. Every
+record passes the per-record source <= decision < resolution timestamp check.
+Phase 5 prints the combined reliability curve and Brier score and demonstrates
+deterministic recalibration only after measuring miscalibration.
 
 Gate evidence: `python3 verify.py --phase 7` verifies the official Cleveland
 Fed and Philadelphia Fed sources, proves the live engine includes those

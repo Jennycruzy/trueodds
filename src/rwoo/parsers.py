@@ -79,7 +79,7 @@ def parse_sports_market(market) -> ParsedMarket | None:
             if match:
                 team, stage_text = match.group(1), match.group(2)
     if team is None:
-        return _parse_tennis_match_market(market)
+        return _parse_team_match_market(market) or _parse_tennis_match_market(market)
     stage_key = stage_key_from_text(stage_text)
     if stage_key is None:
         return ParsedMarket(
@@ -109,6 +109,7 @@ _TENNIS_KEYWORDS = (
     "wimbledon", "roland garros", "us open", "australian open", "atp", "wta", "tennis",
 )
 _VERSUS_SPLIT_RE = re.compile(r"\s+vs?\.?\s+", re.IGNORECASE)
+_TEAM_SPLIT_RE = re.compile(r"\s+(?:vs?\.?|at)\s+", re.IGNORECASE)
 # One-sided titles name the YES player directly and need no external label.
 _WILL_BEAT_RE = re.compile(
     r"^Will (.+?) (?:beat|defeat|win against|get past|knock out|advance past) (.+?)\??$",
@@ -223,6 +224,31 @@ def _parse_tennis_match_market(market) -> ParsedMarket | None:
         market, yes_player, other_player,
         "YES side bound to a specific player from venue metadata",
     )
+
+
+def _parse_team_match_market(market) -> ParsedMarket | None:
+    text = f"{market.question} {market.resolution_rule}".lower()
+    if any(x in text for x in ("mlb", "baseball", "world series")):
+        family, label = "sports.mlb", "MLB"
+    elif any(x in text for x in ("premier league", "champions league", "la liga", "serie a", "bundesliga", "club soccer")):
+        family, label = "sports.club_soccer", "club soccer"
+    else:
+        return None
+    core = market.question.split(":", 1)[-1]
+    core = re.split(r"\s[-–—?]\s|\?", core, maxsplit=1)[0]
+    parts = _TEAM_SPLIT_RE.split(core.strip())
+    if len(parts) != 2:
+        return None
+    a, b = (p.strip(" -") for p in parts)
+    yes = _bind_yes_player(getattr(market, "yes_subtitle", None), a, b)
+    if yes is None:
+        return ParsedMarket(domain="sports", family=family, shape="match_winner", status="parse_missing",
+                            reason=f"{label} match recognized but YES could not be bound to one team",
+                            location=a, source_series=b)
+    return ParsedMarket(domain="sports", family=family, shape="match_winner", status="engine_available",
+                        reason=f"{label} head-to-head with fail-closed YES binding",
+                        location=yes, source_series=b if yes == a else a,
+                        settlement_source=market.resolution_source)
 
 
 def parse_weather_market(market) -> ParsedMarket:

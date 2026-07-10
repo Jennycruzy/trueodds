@@ -631,6 +631,15 @@ class GdpNowcast:
 _GDPNOW_CACHE: dict[str, GdpNowcast] = {}
 
 
+@dataclass(frozen=True)
+class GdpNowHistoricalForecast:
+    forecast_date: date
+    quarter_label: str
+    nowcast: float
+    advance_estimate: float
+    publication_date: date
+
+
 def _excel_serial_to_date(serial: float) -> date:
     return date(1899, 12, 30) + timedelta(days=int(serial))
 
@@ -687,3 +696,50 @@ def fetch_gdpnow_current() -> GdpNowcast:
     )
     _GDPNOW_CACHE["current"] = nowcast
     return nowcast
+
+
+def fetch_gdpnow_track_record() -> list[GdpNowHistoricalForecast]:
+    """Official real-time GDPNow forecasts paired with BEA advance estimates."""
+    content = _get_with_retry(GDPNOW_WORKBOOK_URL, timeout=90).content
+    zf = zipfile.ZipFile(io.BytesIO(content))
+    book = ET.fromstring(zf.read("xl/workbook.xml"))
+    names = [s.attrib.get("name") for s in book.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet")]
+    rows = _xlsx_sheet_rows(content, f"xl/worksheets/sheet{names.index('TrackRecord') + 1}.xml")
+    header = rows[0]
+    indexes = {name: header.index(name) for name in (
+        "Forecast Date", "Quarter being forecasted", "GDP Nowcast",
+        "Advance Estimate From BEA", "Publication Date of Advance Estimate",
+    )}
+    out = []
+    for raw in rows[1:]:
+        try:
+            forecast_date = _excel_serial_to_date(float(raw[indexes["Forecast Date"]]))
+            quarter_date = _excel_serial_to_date(float(raw[indexes["Quarter being forecasted"]]))
+            nowcast = float(raw[indexes["GDP Nowcast"]])
+            actual = float(raw[indexes["Advance Estimate From BEA"]])
+            publication = _excel_serial_to_date(float(raw[indexes["Publication Date of Advance Estimate"]]))
+        except (IndexError, TypeError, ValueError):
+            continue
+        quarter = (quarter_date.month - 1) // 3 + 1
+        if forecast_date >= publication:
+            continue
+        out.append(GdpNowHistoricalForecast(forecast_date, f"{quarter_date.year}Q{quarter}", nowcast, actual, publication))
+    if len(out) < 100:
+        raise RuntimeError(f"GDPNow TrackRecord returned only {len(out)} usable historical forecasts")
+    return out
+
+
+def fetch_gdpnow_tracking_archives() -> list[tuple[date, str, float]]:
+    """Parse the workbook's transposed most-recent archived quarter path."""
+    content = _get_with_retry(GDPNOW_WORKBOOK_URL, timeout=90).content
+    zf = zipfile.ZipFile(io.BytesIO(content)); book = ET.fromstring(zf.read("xl/workbook.xml"))
+    names = [s.attrib.get("name") for s in book.iter("{http://schemas.openxmlformats.org/spreadsheetml/2006/main}sheet")]
+    rows = _xlsx_sheet_rows(content, f"xl/worksheets/sheet{names.index('TrackingArchives') + 1}.xml")
+    dates = [_excel_serial_to_date(float(x)) for x in rows[0] if x]
+    title = next((x for x in rows[1] if "for " in x), "")
+    match = re.search(r"for (\d{4})q([1-4])", title, re.I)
+    gdp = next((r[2:] for r in rows if len(r) > 2 and r[0] == "GDP" and r[1] == "GDP Nowcast"), [])
+    if not match or not gdp:
+        raise RuntimeError("GDPNow TrackingArchives quarter/GDP row not found")
+    label = f"{match.group(1)}Q{match.group(2)}"
+    return [(d, label, float(v)) for d, v in zip(dates, gdp) if v not in ("", "#N/A")]

@@ -801,3 +801,38 @@ def compute_nba_match_probability(team_a: str, team_b: str) -> dict:
         "base_rate": 0.5,
         "refused": False,
     }
+
+
+def _rated_match_result(team_a: str, team_b: str, rows: list[dict], source: str, method: str,
+                        confidence_cap: float = 0.58) -> dict:
+    a, b = _match_entity(team_a, rows), _match_entity(team_b, rows)
+    if not a or not b:
+        return _tennis_refusal(f"could not uniquely match both teams in {source}", team_a, team_b, method)
+    prob = _elo_win_probability(a["rating"], b["rating"])
+    confidence = min(confidence_cap, 0.42 + abs(prob - 0.5) * 0.5)
+    return {"oracle_prob": prob, "confidence": confidence, "prob_low": max(0, prob - 0.08),
+            "prob_high": min(1, prob + 0.08), "per_source_values": {"team_a": a, "team_b": b},
+            "method": method, "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": 0.5, "refused": False}
+
+
+def compute_mlb_match_probability(team_a: str, team_b: str) -> dict:
+    from rwoo.readers import mlb_statsapi
+    try:
+        data = mlb_statsapi.fetch_team_elo()
+    except Exception as exc:  # noqa: BLE001
+        return _tennis_refusal(f"MLB StatsAPI unavailable: {exc}", team_a, team_b, "mlb_source_unavailable")
+    return _rated_match_result(team_a, team_b, data["teams"], "MLB StatsAPI",
+                               "official MLB completed-game results -> current-season Elo; no pitcher/lineup adjustment",
+                               confidence_cap=0.54)
+
+
+def compute_club_soccer_match_probability(team_a: str, team_b: str) -> dict:
+    from rwoo.readers import clubelo
+    try:
+        rows = clubelo.fetch_club_elo()
+    except Exception as exc:  # noqa: BLE001
+        return _tennis_refusal(f"ClubElo unavailable: {exc}", team_a, team_b, "clubelo_source_unavailable")
+    return _rated_match_result(team_a, team_b, rows, "ClubElo",
+                               "dated ClubElo ratings -> Elo win expectation; draw/home-field effects omitted",
+                               confidence_cap=0.54)

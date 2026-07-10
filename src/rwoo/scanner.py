@@ -227,6 +227,10 @@ def evaluate_market(market) -> ScanRecord | None:
             and parsed.source_series
         ):
             engine_result = sports.compute_tennis_match_probability(parsed.location, parsed.source_series)
+        elif parsed is not None and parsed.status == "engine_available" and parsed.shape == "match_winner" and parsed.location and parsed.source_series and parsed.family == "sports.mlb":
+            engine_result = sports.compute_mlb_match_probability(parsed.location, parsed.source_series)
+        elif parsed is not None and parsed.status == "engine_available" and parsed.shape == "match_winner" and parsed.location and parsed.source_series and parsed.family == "sports.club_soccer":
+            engine_result = sports.compute_club_soccer_match_probability(parsed.location, parsed.source_series)
         elif market.venue == "polymarket" and market.question.endswith("win the 2026 FIFA World Cup?"):
             engine_result = sports.compute_world_cup_probability(market.question)
         elif market.venue == "limitless" and market.raw.get("limitless_supported_shape") == "world_cup_winner":
