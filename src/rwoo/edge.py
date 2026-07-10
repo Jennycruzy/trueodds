@@ -31,6 +31,7 @@ Constants used here are cited, not invented:
     actionable records with. Makers pay zero; taker entry is assumed.
 """
 from datetime import datetime, timezone
+import math
 
 KALSHI_TAKER_FEE_RATE = 0.07
 DEFAULT_MAX_DATA_AGE_HOURS = 24.0
@@ -115,6 +116,13 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
         }
 
     oracle_prob = engine_result["oracle_prob"]
+    if not isinstance(oracle_prob, (int, float)) or not math.isfinite(oracle_prob) or not 0 <= oracle_prob <= 1:
+        return {
+            "actionable": False,
+            "side": None,
+            "edge_points": None,
+            "reason": "engine probability is non-finite or outside [0, 1]",
+        }
     confidence = engine_result.get("confidence")
     prob_low = engine_result.get("prob_low")
     prob_high = engine_result.get("prob_high")
@@ -124,12 +132,32 @@ def compute_edge(market, engine_result: dict, fee_multiplier: float = 1.0) -> di
     side = "YES" if edge_points > 0 else "NO"
     friction = estimate_friction(market, fee_multiplier, side=side)
 
+    yes_bid = max(0.0, market.implied_prob - market.spread / 2)
+    yes_ask = min(1.0, market.implied_prob + market.spread / 2)
+    entry_price = yes_ask if side == "YES" else 1.0 - yes_bid
+    side_probability = oracle_prob if side == "YES" else 1.0 - oracle_prob
+    # A binary contract bought at price C has expected pre-fee P-C.  The fee
+    # estimate is deliberately conservative and expressed per $1 contract.
+    expected_profit = side_probability - entry_price - friction["fee"]
+    expected_return = expected_profit / entry_price if entry_price > 0 else None
+
     base = {
         "side": side,
         "edge_points": edge_points,
         "confidence": confidence,
         "uncertainty_band": [prob_low, prob_high] if prob_low is not None else None,
         "friction": friction,
+        "execution": {
+            "yes_bid": yes_bid,
+            "yes_ask": yes_ask,
+            "side": side,
+            "entry_price": entry_price,
+            "side_probability": side_probability,
+            "estimated_fee_per_contract": friction["fee"],
+            "expected_profit_per_contract": expected_profit,
+            "expected_return_on_cost": expected_return,
+            "pricing_basis": "derived executable ask from canonical midpoint and spread",
+        },
     }
 
     if friction.get("missing_fee"):

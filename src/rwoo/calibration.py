@@ -64,6 +64,45 @@ def max_calibration_gap(curve: list[dict]) -> float:
     return max(abs(row["mean_predicted"] - row["actual_hit_rate"]) for row in curve)
 
 
+def calibration_breakdown(records: list[CalibrationRecord], width: float = 0.1) -> dict:
+    """Report calibration separately by domain and confidence/probability band.
+
+    Probability band is the measurable historical analogue of a confidence
+    claim in the current record schema.  Counts remain explicit so a strong
+    percentage from a tiny sample cannot masquerade as strong evidence.
+    """
+    if not records:
+        raise ValueError("cannot score an empty calibration record")
+
+    def report(values: list[CalibrationRecord]) -> dict:
+        curve = reliability_curve(values, width=width)
+        return {
+            "count": len(values),
+            "brier_score": brier_score(values),
+            "max_calibration_gap": max_calibration_gap(curve),
+            "reliability": curve,
+        }
+
+    domains: dict[str, list[CalibrationRecord]] = {}
+    bands: dict[str, list[CalibrationRecord]] = {}
+    domain_bands: dict[tuple[str, str], list[CalibrationRecord]] = {}
+    for record in records:
+        band = probability_bucket(record.oracle_prob, width)
+        domains.setdefault(record.domain, []).append(record)
+        bands.setdefault(band, []).append(record)
+        domain_bands.setdefault((record.domain, band), []).append(record)
+    return {
+        "overall": report(records),
+        "by_domain": {name: report(values) for name, values in sorted(domains.items())},
+        "by_probability_band": {name: report(values) for name, values in sorted(bands.items())},
+        "by_domain_and_probability_band": {
+            f"{domain}:{band}": report(values)
+            for (domain, band), values in sorted(domain_bands.items())
+        },
+        "warning": "band hit rates are evidence only with their displayed sample counts",
+    }
+
+
 def recalibrate_by_bucket(records: list[CalibrationRecord], width: float = 0.2) -> tuple[list[dict], float]:
     """Leave-one-out bucket recalibration.
 

@@ -1,0 +1,84 @@
+# Evidence, Promotion, And Optional Execution
+
+Last updated: 2026-07-10
+
+## Product boundary
+
+Real-World Odds Oracle is a paid decision API. Its primary deliverable is an
+independent probability with uncertainty, net expected value, a deterministic
+why trace, calibration context, and a hash-committed receipt. Cross-venue
+comparison is a second paid decision surface. Execution is an optional
+downstream adapter and is never required to use the oracle.
+
+The oracle does not promise winning bets. It proves what it knew, when it knew
+it, how the number was produced, and how forecasts performed after resolution.
+
+## Continuous evidence lifecycle
+
+1. The live scanner evaluates supported weather, economics, and sports markets.
+2. Every priced record is appended to `data/receipts/forecast_evidence.jsonl`.
+3. The record commits the event group, rule hash, authority, model version,
+   probability interval, confidence, executable EV, and why trace.
+4. Same-market/same-model snapshots are deduplicated within a UTC day.
+5. A six-hour systemd timer checks unresolved records.
+6. Kalshi finalized results, Polymarket closed outcomes, and Limitless resolved
+   outcomes are appended without altering the original forecast.
+7. Supported US high/low weather results are checked directly against NOAA
+   NCEI Daily Summaries for the registered station and date.
+8. Calibration reports are written atomically under `data/public/`.
+
+Legacy venue rows created before venue-specific resolution IDs existed remain
+in the immutable ledger but are labeled unsupported for automatic resolution.
+
+## Independence and anti-selection rules
+
+- One location/date/metric or underlying sporting/economic event is one group.
+- Multiple thresholds remain visible but do not increase independent sample size.
+- All priced calls are retained, including non-actionable calls and losses.
+- Model changes require a new version and are evaluated separately.
+- Checkpoints are fixed before results and cannot move afterward.
+- Forecast and funded-trade records remain separate. A trade requires a real fill ID.
+
+## Promotion gates
+
+Reviews occur at 30, 100, 250, and 500 independent resolved events. The first
+weather gate currently requires:
+
+| Criterion | Threshold |
+| --- | ---: |
+| Independent event groups | at least 30 |
+| Brier score | at most 0.20 |
+| Maximum calibration gap | at most 0.15 |
+| Venue/NOAA concordance | at least 95% |
+
+Passing numbers is necessary but insufficient. Review also covers source
+failures, parser/entity safety, confidence bands, executable costs, forecast
+horizon, regime stability, and incidents. Every economics and sports family
+has an independent gate.
+
+## Execution policy
+
+Funded execution is disabled. `src/rwoo/trades.py` records a real trade only
+after explicit approval and a genuine venue fill identifier. A recommendation
+or unfilled order is never counted as a trade.
+
+After weather passes, the next implementation is a disabled-by-default Kalshi
+adapter enforcing operator approval, a weather-only allowlist, limit orders,
+per-event/daily/weekly-loss/drawdown limits, correlation-aware exposure,
+minimum net edge, complete receipts, and an immediate kill switch. Secrets may
+never enter logs, prompts, receipts, or public artifacts.
+
+## Public communication
+
+Moltbook/X posts must come from already-precommitted forecasts, link to the
+receipt, disclose unresolved status, and include the why trace. A market may
+not be selected after partial result information appears. Free public calls
+demonstrate the product; paid API calls remain the business model.
+
+## Current production state
+
+- Evidence timer: enabled every six hours.
+- Local and production suite: 94 passing tests as of 2026-07-10.
+- First report: 777 precommitted forecasts and zero resolved immediately after launch.
+- Weather next checkpoint: 30 independent resolved events.
+- Funded execution: disabled.

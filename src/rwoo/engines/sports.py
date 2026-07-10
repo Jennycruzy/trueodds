@@ -330,14 +330,41 @@ def _in_tournament_result(country: str, want_stage: str) -> dict:
     key = _normal_name(country)
     key = {"usa": "united states"}.get(key, key)
 
+    # A missing entity is not a settled loss.  Returning 0 here used to turn
+    # unsupported questions such as "Europe (UEFA)" into extremely confident
+    # NO recommendations.  Bind the requested entity to the official bracket
+    # before doing any probability arithmetic and fail closed when it cannot
+    # be bound.
+    solved_base = solve_remaining_bracket(state, ratings)
+    if key not in solved_base:
+        return {
+            "oracle_prob": None,
+            "confidence": 0.0,
+            "prob_low": None,
+            "prob_high": None,
+            "per_model_prob": {},
+            "per_source_values": {
+                "country": country,
+                "normalized_entity": key,
+                "official_bracket_entities": sorted(solved_base),
+            },
+            "method": "unsupported_or_unbound_world_cup_entity",
+            "data_freshness": datetime.now(timezone.utc).isoformat(),
+            "base_rate": None,
+            "refused": True,
+            "reason": (
+                f"could not bind {country!r} to exactly one team in the official "
+                "World Cup bracket; regions and confederations require a separate "
+                "explicit aggregation model"
+            ),
+        }
+
     def probability_with(rating_shift: float) -> float:
         shifted = dict(ratings)
         if key in shifted:
             shifted[key] = shifted[key] + rating_shift
         solved = solve_remaining_bracket(state, shifted)
-        team = solved.get(key)
-        if team is None:
-            return 0.0
+        team = solved[key]
         if want_stage == "champion":
             return team["champion"]
         return team["exit"].get(want_stage, 0.0)

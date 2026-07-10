@@ -2,13 +2,15 @@
 
 **The calibration oracle for data-resolvable prediction markets — the true odds, proven.**
 
-An OKX AI Agent Service Provider (ASP) that other agents pay to call before
-betting a data-resolvable prediction market. Given a market, it:
+An OKX AI Agent Service Provider (ASP) that agents and individuals pay to call
+before acting on a data-resolvable prediction market. The product is a paid
+decision API, not a custodial trading bot. Given a market, it:
 
 1. **Reads the market** — extracts the implied probability (bid/ask midpoint,
    not last trade) and the *exact* resolution rule + settlement source + time.
-2. **Computes the true probability** — independently, from multiple real-world
-   data sources, with confidence derived from how much those sources agree.
+2. **Computes an independent probability** — deterministically from real-world
+   sources, with an uncertainty interval, explicit model version, and a
+   transparent explanation of source/model disagreement.
 3. **Computes the edge** — `oracle_prob − implied_prob`, qualified against its
    own uncertainty and the market's trading friction; refuses to call an edge
    that isn't beyond both.
@@ -17,8 +19,46 @@ betting a data-resolvable prediction market. Given a market, it:
 5. **Returns a hash-committed receipt** — anchored on X Layer mainnet, so no
    one (including the builder) can rewrite history after the fact.
 
+No forecast is guaranteed to win. High confidence is earned through
+precommitted, independently resolved calibration evidence; model agreement by
+itself is not presented as proof of accuracy.
+
 Flagship domain: **weather** (least-covered, most-differentiated). Volume
 domains: **economics** and **sports**.
+
+## Product surface
+
+The listing leads with three paid services:
+
+1. **`rwoo.check_market`** — probability, interval, model version, confidence,
+   executable-price EV, explanation trace, and tamper-evident receipt.
+2. **`rwoo.cross_venue_edge`** — compares candidate-equivalent contracts and
+   refuses to call a price difference arbitrage unless resolution authority,
+   time, event semantics, and YES orientation match.
+3. **`rwoo.get_calibration`** — the public precommitted track record by domain,
+   family, model version, probability band, and independent event count.
+
+The same signed verdict can later feed an approval-gated execution adapter.
+Execution is optional proof that the oracle is operationally useful: callers
+never need to surrender custody, and funded execution remains disabled until
+the relevant family passes fixed evidence gates.
+
+## Live evidence and promotion policy
+
+`rwoo.evidence` runs every six hours in production. It precommits every priced
+forecast, resolves finalized Kalshi, Polymarket, and Limitless contracts,
+checks supported US weather outcomes directly against NOAA NCEI station
+observations, and publishes grouped calibration reports. Multiple strikes on
+one event share one `event_group_id` and cannot inflate sample size.
+
+Weather is reviewed only at 30, 100, 250, and 500 independently resolved
+events. The first gate requires at least 30 groups, Brier score <=0.20, maximum
+calibration gap <=0.15, NOAA concordance >=95%, and a separate correctness and
+risk review. Economics and each sports family are promoted separately. See
+`docs/EVIDENCE_AND_EXECUTION.md` for the operating policy.
+
+For the exact checklist to follow after the callable ASP/frontend build returns,
+see `docs/POST_ASP_HANDOFF.md`.
 
 ## The Deterministic-Core Law
 
@@ -96,7 +136,9 @@ python3 verify.py --phase 5   # calibration backtest: weather/economics/sports s
 python3 verify.py --phase 6   # receipts, tamper test, real X Layer mainnet anchor
 python3 verify.py --phase 7   # pre-listing hardening: economics/sports/primary-source/daily-loop gate
 python3 verify.py --phase 8   # live opportunity scanner: broad, cost-aware batch scan
+python3 verify.py --phase 9   # broad family coverage + honest refusal paths
 PYTHONPATH=src python3 -m rwoo.scanner --write --top 20
+PYTHONPATH=src python3 -m rwoo.evidence run
 ```
 
 Both make live network calls and print the real responses plus a
@@ -143,7 +185,16 @@ or a canned pass.
     Limitless edge is quantified and can be actionable; the exact per-order fee
     is an execution-time reconciliation. Refuses non-actionable edges.
   - `calibration.py` — Brier score, reliability buckets, and transparent
-    recalibration utilities.
+    recalibration utilities with domain/band breakdowns and sample counts.
+  - `identity.py` — stable independent-event grouping and model versions.
+  - `explanations.py` — deterministic why traces exposing model disagreement.
+  - `cross_venue.py` — fail-closed contract-equivalence and executable edge analysis.
+  - `evidence.py` — append-only precommitment, multi-venue resolution,
+    calibration reports, and fixed promotion checkpoints.
+  - `official_outcomes.py` — direct authoritative-source concordance checks,
+    beginning with NOAA NCEI high/low observations.
+  - `trades.py` — approval/fill/settlement/P&L receipts; it does not hold keys
+    or submit orders.
   - `backtests/weather.py` — no-cap weather calibration backtest across all
     verified stations, using finalized Kalshi markets plus Open-Meteo Single
     Runs forecasts available before market open.
@@ -167,6 +218,6 @@ or a canned pass.
     (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
     actually succeeded — an outer bundler-transaction receipt status alone is
     not sufficient proof, learned the hard way; see Ledger §16.1).
-  - (OKX listing, funded trade/payment execution, public pages — later phases)
+  - (OKX listing, authenticated execution adapter, public UI — gated later work)
 - `CREDITS.md` — attribution for third-party data sources and libraries.
 - `LICENSE` — MIT.

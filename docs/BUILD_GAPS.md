@@ -4,6 +4,36 @@ Last updated: 2026-07-10 (fourth session: recession-quarter routing wired +
 tested; third session: parser tests, Phase 9 coverage gate, tennis/NBA sources,
 head-to-head YES-side binding)
 
+## 2026-07-10 Production evidence and oracle-product hardening
+
+Completed:
+
+- Unknown World Cup entities/regions fail closed instead of becoming false zeroes.
+- Cross-venue comparison is first-class and requires proven contract equivalence.
+- Priced verdicts include executable EV and deterministic why traces.
+- Calibration splits by domain/probability band with visible sample counts.
+- Stable event grouping, model versions, append-only precommitments,
+  Kalshi/Polymarket/Limitless resolution, and NOAA high/low concordance run
+  continuously every six hours.
+- Reviews are fixed at 30/100/250/500 events. Weather's first gate requires
+  Brier <=0.20, gap <=0.15, NOAA concordance >=95%, and safety review.
+- Real-trade lifecycle receipts exist, but order submission remains disabled.
+  The paid oracle is the product; execution is an optional gated consumer.
+- Local and production suites contain 94 passing tests.
+
+Immediate remaining work:
+
+1. Accumulate evidence to the 30-event weather checkpoint.
+2. Review results without moving the checkpoint.
+3. Complete the hosted calibration UI and OKX ASP callable surface.
+4. Submit the read-only paid oracle for OKX review without waiting for trading.
+5. Only after a pass, add a disabled authenticated Kalshi adapter and approve
+   micro-stake limits explicitly.
+
+Operational handoff: `docs/POST_ASP_HANDOFF.md` separates the immediate ASP
+launch/listing path from the time-dependent evidence path and is the starting
+checklist when the callable API/frontend implementation returns.
+
 ## 2026-07-10 Session — tests, Phase 9 gate, tennis/NBA, YES-binding
 
 Done this session (each verified live before commit):

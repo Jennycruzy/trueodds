@@ -442,3 +442,20 @@ Recorded here to close the source-provenance gap for the engines added in the 20
 
 ### Ledger status as of 2026-07-10 (Phase 6 + pre-listing hardening + parser/headline-CPI scanner expansion + Phase 9 coverage gate + tennis/NBA sources complete)
 All GATE 0–9-required facts are verified with real evidence above, including a real, correctly-verified X Layer mainnet anchor transaction (§16.1) after catching and fixing a genuine false-positive in the anchor verification logic itself, the 2026-07-09 engine-breadth economics/weather/FIFA sources (§23), and the 2026-07-10 grouped calibration and source expansions (§24–25). Other open items remain explicitly flagged and **not assumed**: the Payment SDK settlement token (§7), the Kalshi fee-schedule PDF direct fetch blocked by HTTP 429 from this workspace, exact Limitless fee/execution support (§21), tennis tournament-winner and NBA champion simulations (§22), Cleveland historical-nowcast validation, a real structured Limitless weather settlement test, secondary club-soccer results replay, funded execution/risk controls, and the hosted public calibration page.
+
+## 26. Continuous resolution and direct weather concordance — 2026-07-10
+
+- **Polymarket:** official Gamma `GET /markets/{id}` exposes closed state,
+  aligned outcomes/outcome prices, source, and resolver metadata. Resolution
+  requires closed state and exactly one winning-boundary outcome.
+- **Limitless:** official documentation defines `marketResolved` with slug,
+  winning outcome/index, and resolution date. Polling requires resolved state
+  plus an unambiguous winner; otherwise the record remains pending.
+- **NOAA:** the official NCEI Daily Summaries endpoint was verified live for
+  Central Park station `USW00094728`: 2026-07-01 returned TMAX 93°F and
+  2026-06-15 returned TMAX 74°F. A recent unpublished date remained pending.
+- **Independence correction:** strike terms are stored for settlement but
+  excluded from `event_group_id`; multiple buckets on one event count once.
+- **Promotion:** reviews are fixed at 30/100/250/500 independent events. The
+  first weather gate requires Brier <=0.20, calibration gap <=0.15, and direct
+  NOAA concordance >=95%, plus safety review. Execution remains disabled.

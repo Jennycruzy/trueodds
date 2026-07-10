@@ -18,6 +18,9 @@ from rwoo import edge, weather_stations
 from rwoo.coverage import classify_market_shape
 from rwoo.engines import economics, sports, weather
 from rwoo.parsers import parse_economics_market, parse_sports_market, parse_weather_market
+from rwoo.explanations import build_why_trace
+from rwoo.cross_venue import find_cross_venue_edges
+from rwoo.identity import event_identity, model_version
 from rwoo.readers import kalshi, limitless, polymarket
 
 # Every weather series with a verified station is swept completely; the
@@ -55,6 +58,14 @@ class ScanRecord:
     net_edge_points: float | None
     reason: str
     method: str
+    why: dict[str, Any]
+    execution: dict[str, Any] | None
+    event_group_id: str
+    event_identity: dict[str, Any]
+    model_version: str
+    resolution_rule: str
+    resolution_source: str
+    venue_resolution_id: str
     resolution_time: str | None
     fetched_at: str
 
@@ -89,6 +100,7 @@ def _market_fee_multiplier(market) -> float:
 
 def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> ScanRecord:
     coverage = classify_market_shape(market)
+    identity = event_identity(market, coverage.family, coverage.shape)
     friction = qualified_edge.get("friction") or {}
     edge_points = qualified_edge.get("edge_points")
     total_friction = friction.get("total_friction")
@@ -117,6 +129,14 @@ def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> Sc
         net_edge_points=net_edge,
         reason=qualified_edge.get("reason", ""),
         method=engine_result.get("method", ""),
+        why=build_why_trace(engine_result),
+        execution=qualified_edge.get("execution"),
+        event_group_id=identity["event_group_id"],
+        event_identity=identity["event_identity"],
+        model_version=model_version(coverage.family),
+        resolution_rule=market.resolution_rule,
+        resolution_source=market.resolution_source,
+        venue_resolution_id=_venue_resolution_id(market),
         resolution_time=market.resolution_time,
         fetched_at=market.fetched_at,
     )
@@ -138,6 +158,7 @@ def _missing_from_edge(qualified_edge: dict) -> str | None:
 
 def _unsupported_record(market, reason: str) -> ScanRecord:
     coverage = classify_market_shape(market)
+    identity = event_identity(market, coverage.family, coverage.shape)
     friction = edge.estimate_friction(
         market,
         fee_multiplier=_market_fee_multiplier(market) if market.venue == "kalshi" else 1,
@@ -164,9 +185,26 @@ def _unsupported_record(market, reason: str) -> ScanRecord:
         net_edge_points=None,
         reason=f"included but not actionable: {coverage.reason or reason}",
         method=friction.get("method", ""),
+        why={"summary": coverage.reason},
+        execution=None,
+        event_group_id=identity["event_group_id"],
+        event_identity=identity["event_identity"],
+        model_version=model_version(coverage.family),
+        resolution_rule=market.resolution_rule,
+        resolution_source=market.resolution_source,
+        venue_resolution_id=_venue_resolution_id(market),
         resolution_time=market.resolution_time,
         fetched_at=market.fetched_at,
     )
+
+
+def _venue_resolution_id(market) -> str:
+    if market.venue == "polymarket":
+        return str(market.raw.get("id") or market.market_id)
+    if market.venue == "limitless":
+        raw_market = market.raw.get("market", {}) if isinstance(market.raw, dict) else {}
+        return str(raw_market.get("slug") or raw_market.get("id") or market.market_id)
+    return market.market_id
 
 
 def evaluate_market(market) -> ScanRecord | None:
@@ -372,6 +410,7 @@ def scan_opportunities(
     if include_limitless:
         markets.extend(limitless.fetch_canonical_markets(active_limit=limitless_limit))
     markets = _dedupe_markets(markets)
+    cross_venue = find_cross_venue_edges(markets)
 
     evaluated_records = []
     included_unsupported = []
@@ -435,6 +474,12 @@ def scan_opportunities(
         "limitless_group_children_seen": limitless_group_children_seen,
         "errors": errors,
         "actionable_count": len(actionable),
+        "cross_venue": {
+            "candidate_count": len(cross_venue),
+            "actionable_count": sum(row["actionable"] for row in cross_venue),
+            "opportunities": cross_venue,
+            "rule": "only exact-equivalent contracts may produce a cross-venue edge",
+        },
         "top": [asdict(record) for record in ranked],
         "included_unsupported": [asdict(record) for record in included_unsupported],
         "action_rule": "YES if price < prob_low - costs; NO if price > prob_high + costs; otherwise no trade",
@@ -523,8 +568,12 @@ def write_scan_artifacts(
     md_path = Path(md_path)
     json_path.parent.mkdir(parents=True, exist_ok=True)
     md_path.parent.mkdir(parents=True, exist_ok=True)
-    json_path.write_text(json.dumps(scan, indent=2, sort_keys=True), encoding="utf-8")
-    md_path.write_text(render_markdown(scan), encoding="utf-8")
+    json_tmp = json_path.with_suffix(json_path.suffix + ".tmp")
+    md_tmp = md_path.with_suffix(md_path.suffix + ".tmp")
+    json_tmp.write_text(json.dumps(scan, indent=2, sort_keys=True), encoding="utf-8")
+    md_tmp.write_text(render_markdown(scan), encoding="utf-8")
+    json_tmp.replace(json_path)
+    md_tmp.replace(md_path)
 
 
 def main(argv: list[str] | None = None) -> int:
