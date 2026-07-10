@@ -80,6 +80,21 @@ Remaining (next session, in this order):
    appears with station/date/strike, add the Limitless weather parser path.
 10. Non-US CPI (China/Korea/etc.): official sources (NBS/KOSIS) not wired;
     stays source_missing.
+11. Sports beyond the World Cup — two sources VERIFIED REACHABLE 2026-07-09
+    but not yet wired into engines:
+    - ClubElo public API (api.clubelo.com/YYYY-MM-DD, HTTP 200, full current
+      club Elo table, no key) -> club-soccer match winners and outrights
+      (Limitless soccer matches, EPL/UCL outrights).
+    - MLB official StatsAPI (statsapi.mlb.com, HTTP 200, 30 teams, live
+      daily schedule, no key; MLB is IN SEASON) -> team-rating engine from
+      real results (Elo replay like sports_elo.py) for Kalshi KXMLB
+      moneylines.
+    Blocked/deferred and why: tennis (ATP 403, community data 404), NBA
+    (stats.nba.com timeout), NHL (API reachable but offseason — engine
+    cannot honestly clear the confidence floor until real 2026-27 results
+    exist), esports (no free verified source). Player props and the ~600k
+    Kalshi parlay/multigame markets need player-level sources and
+    correlated-leg models — a separate, much deeper tier of work.
 
 This file records incomplete work that must not be forgotten between phases.
 It is intentionally blunt: if a component is not complete, it stays listed
