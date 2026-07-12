@@ -1,6 +1,6 @@
 # Evidence, Promotion, And Optional Execution
 
-Last updated: 2026-07-10
+Last updated: 2026-07-12
 
 ## Product boundary
 
@@ -56,11 +56,43 @@ failures, parser/entity safety, confidence bands, executable costs, forecast
 horizon, regime stability, and incidents. Every economics and sports family
 has an independent gate.
 
+Weather promotion is model-version-specific. Results from
+`weather-ensemble-v2` cannot promote `weather-ensemble-v3-power-calibrated`.
+At every crossed 30/100/250/500 checkpoint the public artifact now freezes a
+review containing calibration, probability-band results, comparison with the
+forecast-time market probability, and cost-adjusted paper performance. A band
+becomes promotion-relevant at 30 independent event groups. Drift monitoring
+segments results by station, metric, forecast horizon, and warm/cool season;
+an adequately sampled segment with Brier score above 0.20 locks execution.
+
+Paper performance selects at most one recommendation per independent event
+(the highest precommitted expected profit) and settles one contract at the
+recorded executable entry price after the recorded fee. This prevents a large
+threshold ladder from inflating the apparent number of independent bets.
+Closing-price comparison is reported only when a venue returns a genuine final
+quote; resolved 0/1 settlement prices are never mislabeled as closing forecasts.
+
 ## Execution policy
 
 Funded execution is disabled. `src/rwoo/trades.py` records a real trade only
 after explicit approval and a genuine venue fill identifier. A recommendation
 or unfilled order is never counted as a trade.
+
+The trade ledger now has a fail-closed execution interlock. A precommit is
+rejected unless the operator explicitly enables funded execution, a readable
+promotion report exists, the required family is eligible, and its interlock is
+`unlocked`. Missing, stale, malformed, or failing evidence keeps it locked.
+Reports older than 12 hours automatically re-lock execution. An append-only
+operator kill switch overrides every other setting. Funded recommendations
+must be limit orders, include an independent event-group identity, and are
+limited to one position per event. A separate mandatory correlation-group
+identity caps combined exposure across related locations, dates, or contracts.
+
+Risk limits rise only with passed checkpoints: at 30 groups the maximum is $5
+per position, $15 daily exposure, and $25 trailing-seven-day realized loss;
+the corresponding tiers at 100/250/500 are $10/$20/$50 per position,
+$30/$60/$150 daily exposure, and $50/$100/$250 weekly loss. These are hard
+ceilings, not suggested bet sizes, and operator-supplied limits may be lower.
 
 After weather passes, the next implementation is a disabled-by-default Kalshi
 adapter enforcing operator approval, a weather-only allowlist, limit orders,

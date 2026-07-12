@@ -1,223 +1,435 @@
 # Real-World Odds Oracle
 
-**The calibration oracle for data-resolvable prediction markets — the true odds, proven.**
+**Independent weather, economic-data, and sports probabilities for real-money decisions.**
 
-An OKX AI Agent Service Provider (ASP) that agents and individuals pay to call
-before acting on a data-resolvable prediction market. The product is a paid
-decision API, not a custodial trading bot. Given a market, it:
+Real-World Odds Oracle is a live, agent-callable intelligence API built around
+three real-world domains: **weather**, **economic data**, and **sports**. It
+turns forecast models, official releases, observation stations, rating systems,
+and tournament simulations into independent probabilities that agents can
+compare with live market prices before committing real money.
 
-1. **Reads the market** — extracts the implied probability (bid/ask midpoint,
-   not last trade) and the *exact* resolution rule + settlement source + time.
-2. **Computes an independent probability** — deterministically from real-world
-   sources, with an uncertainty interval, explicit model version, and a
-   transparent explanation of source/model disagreement.
-3. **Computes the edge** — `oracle_prob − implied_prob`, qualified against its
-   own uncertainty and the market's trading friction; refuses to call an edge
-   that isn't beyond both.
-4. **Attaches its calibration record** — a public, tamper-proof, append-only
-   track record proving past probabilities came true at the stated rates.
-5. **Returns a hash-committed receipt** — anchored on X Layer mainnet, so no
-   one (including the builder) can rewrite history after the fact.
+Weather is the flagship: station-bound temperature and precipitation forecasts
+are modeled independently and resolved against authoritative observations.
+Economic-data services cover scheduled releases such as CPI, GDP, employment,
+payrolls, rates, and supported recession structures. Sports services cover
+supported tournament, team, and match structures using explicit rating systems
+and deterministic simulation. Prediction markets are where these probabilities
+are priced and acted upon; they are not a substitute for the underlying
+weather, economic, or sports analysis.
 
-No forecast is guaranteed to win. High confidence is earned through
-precommitted, independently resolved calibration evidence; model agreement by
-itself is not presented as proof of accuracy.
+- Public site: <https://trueodd.xyz>
+- API: <https://api.trueodd.xyz>
+- Interactive API documentation: <https://api.trueodd.xyz/docs>
+- OpenAPI schema: <https://api.trueodd.xyz/openapi.json>
+- Service catalog: <https://api.trueodd.xyz/v1/service-metadata>
+- Public calibration: <https://api.trueodd.xyz/v1/calibration>
 
-Flagship domain: **weather** (least-covered, most-differentiated). Volume
-domains: **economics** and **sports**.
+The product is designed for real-money decision workflows. It does not confuse
+a model probability with a guaranteed outcome: every verdict carries the
+information an agent needs to decide whether an apparent edge survives model
+uncertainty, executable prices, spread, fees, source freshness, and evidence
+quality.
 
-## Product surface
+## Three real-world intelligence domains
 
-The listing leads with three paid services:
+The service combines three independently modeled capabilities in one API:
 
-1. **`rwoo.check_market`** — probability, interval, model version, confidence,
-   executable-price EV, explanation trace, and tamper-evident receipt.
-2. **`rwoo.cross_venue_edge`** — compares candidate-equivalent contracts and
-   refuses to call a price difference arbitrage unless resolution authority,
-   time, event semantics, and YES orientation match.
-3. **`rwoo.get_calibration`** — the public precommitted track record by domain,
-   family, model version, probability band, and independent event count.
+1. **Weather** — station-bound daily high/low and precipitation probabilities
+   derived from multiple forecast models and checked against NOAA observations.
+2. **Economic data** — CPI, GDP, labor, rates, and recession structures tied to
+   official release definitions and forward-looking official sources where
+   available.
+3. **Sports** — structured tournament and match probabilities from explicit
+   rating systems and deterministic simulation rather than generated guesses.
 
-The same signed verdict can later feed an approval-gated execution adapter.
-Execution is optional proof that the oracle is operationally useful: callers
-never need to surrender custody, and funded execution remains disabled until
-the relevant family passes fixed evidence gates.
+The durable advantage is the shared architecture across all three domains:
+independent models, exact outcome-rule binding, authoritative sources,
+fail-closed coverage, cost-aware edges, continuous resolution, public
+calibration, and verifiable receipts.
 
-## Live evidence and promotion policy
+## What an agent receives
 
-`rwoo.evidence` runs every six hours in production. It precommits every priced
-forecast, resolves finalized Kalshi, Polymarket, and Limitless contracts,
-checks supported US weather outcomes directly against NOAA NCEI station
-observations, and publishes grouped calibration reports. Multiple strikes on
-one event share one `event_group_id` and cannot inflate sample size.
+For a supported weather event, economic release, or sports event, the oracle
+returns:
 
-Weather is reviewed only at 30, 100, 250, and 500 independently resolved
-events. The first gate requires at least 30 groups, Brier score <=0.20, maximum
-calibration gap <=0.15, NOAA concordance >=95%, and a separate correctness and
-risk review. Economics and each sports family are promoted separately. See
-`docs/EVIDENCE_AND_EXECUTION.md` for the operating policy.
+- independent YES probability;
+- probability interval and confidence;
+- deterministic model version;
+- source freshness and model-disagreement trace;
+- market-implied probability from executable bid/ask data;
+- candidate side (`YES` or `NO`);
+- entry-price basis;
+- estimated spread and venue fees;
+- expected profit per contract and expected return on cost;
+- actionable, wait, or refused status with an explicit reason;
+- family/model/band calibration context;
+- promotion and execution-eligibility state;
+- hash-chained decision receipt.
 
-For the exact checklist to follow after the callable ASP/frontend build returns,
-see `docs/POST_ASP_HANDOFF.md`.
+Unsupported, ambiguous, stale, or insufficiently sourced markets are refused.
+Unknown inputs never silently become a zero probability.
 
-## The Deterministic-Core Law
+## Agent services
 
-Every probability this project emits is computed by deterministic code
-operating on real data. A language model is used *only* to understand/route a
-market question and to narrate results in prose — never to produce, adjust,
-or "sanity-check" the probability number itself. This is proven, not claimed:
-see Phase 3's Gate 3, which reproduces a probability with the LLM completely
-disconnected from the call path.
+### `rwoo.check_market`
 
-## Status
+Evaluate one supported market.
 
-This build is phased, with a human-readable verification gate at the end of
-each phase (see `docs/VERIFICATION_LEDGER.md` for every external fact this
-project depends on, and how it was verified). Currently: **live opportunity
-scanner complete** on top of Phase 6/7 hardening (foundations, market readers,
-the weather engine, edge computation with its reproducibility proof, the
-restraint layer, economics/sports engines, no-lookahead calibration,
-tamper-evident receipts with a real corrected X Layer mainnet anchor,
-receipt-backed daily proof loop, and a ranked cost-aware scan across live
-markets). The scanner now keeps a broad market inventory across venues and
-records a coverage state for every included weather/economics/sports market:
-`actionable`, `wait`, `model_missing`, `parse_missing`, `source_missing`, or
-`fee_missing`.
+```http
+POST /v1/check-market
+Content-Type: application/json
 
-The calibration backtest code keeps full/no-cap paths, but the human-readable
-gate uses explicit runtime controls where live APIs are slow or quota-limited:
-- **Weather** can run across all 5 verified stations against every real
-  settled Kalshi market, bounded only by Open-Meteo's real archived-forecast
-  window. `verify.py --phase 5` defaults to 5 real records per station
-  (25 total) with progress output and a raw-response cache so the judge-facing
-  gate does not look frozen. Set `RWOO_WEATHER_GATE_RECORDS_PER_SERIES=0` for
-  the full no-cap run.
-- **Economics** scores every real settled core-CPI market using the actual
-  BLS release-date schedule (not calendar month), adds official Philadelphia
-  Fed SPF probability distributions for historical calibration, and uses the
-  official BLS flat-file mirror as a quota-free fallback when the BLS API is
-  unavailable. The live economics engine now also consumes official
-  forward-looking Cleveland Fed nowcasts plus SPF density data for core CPI,
-  and official BLS all-items CPI-U annual history for US headline-CPI annual
-  bins.
-- **Sports** scores every real per-team market from two real, resolved
-  tournaments (Euro 2024, Copa América 2024) using a self-computed Elo rating
-  history replayed from 49,506 real historical matches, because no public API
-  provides national-team ratings by arbitrary past date. The live sports
-  engine now blends World Football Elo with the official FIFA/Coca-Cola Men's
-  World Ranking and includes deterministic 48-team tournament simulators for
-  both source families.
-- **Opportunity scanning** pulls broad live batches from Kalshi, Polymarket,
-  and Limitless, runs the supported deterministic engines, applies uncertainty
-  and real trading-friction checks, ranks actionable candidates, and emits
-  JSON/Markdown artifacts under `data/public/`. Weather/economics/sports
-  markets without a matching engine are still included as explicit
-  non-actionable records with family/shape/status fields. Unrelated
-  `other`/price-oracle noise remains skipped. Limitless taker fees are charged
-  as the conservative upper bound of the venue's official published buy-fee
-  table (an upper bound can only under-call an edge, never over-call it), so a
-  Limitless edge can qualify as actionable; the exact per-order fee is only
-  returned per executed order and is reconciled at execution time, not in the
-  scanner.
-
-## Reproduce every claim
-
-Every number in this project traces to a real run. To check Phase 0's claims
-yourself:
-
-```bash
-pip install -r requirements.txt
-python3 verify.py --phase 0   # foundations: live Open-Meteo, Kalshi, Polymarket calls
-python3 verify.py --phase 1   # market readers: canonical objects from live markets
-python3 verify.py --phase 2   # weather engine: multi-model consensus + confidence
-python3 verify.py --phase 3   # edge computation + a live reproducibility proof
-python3 verify.py --phase 4   # restraint layer + live BLS economics and Elo sports baselines
-python3 verify.py --phase 5   # calibration backtest: weather/economics/sports scored
-python3 verify.py --phase 6   # receipts, tamper test, real X Layer mainnet anchor
-python3 verify.py --phase 7   # pre-listing hardening: economics/sports/primary-source/daily-loop gate
-python3 verify.py --phase 8   # live opportunity scanner: broad, cost-aware batch scan
-python3 verify.py --phase 9   # broad family coverage + honest refusal paths
-PYTHONPATH=src python3 -m rwoo.scanner --write --top 20
-PYTHONPATH=src python3 -m rwoo.evidence run
+{
+  "market": {
+    "venue": "kalshi",
+    "market_id": "<market-id>"
+  }
+}
 ```
 
-Both make live network calls and print the real responses plus a
-plain-English PASS/FAIL for each acceptance criterion — nothing is a fixture
-or a canned pass.
+The response contains the forecast, market comparison, execution economics,
+calibration scope, request ID, and receipt reference. Idempotency and client
+request IDs are supported through headers.
 
-## Repo layout
+```bash
+curl -sS https://api.trueodd.xyz/v1/check-market \
+  -H 'Content-Type: application/json' \
+  -H 'X-Request-ID: agent-example-001' \
+  -H 'Idempotency-Key: market-check-001' \
+  -d '{"market":{"venue":"kalshi","market_id":"<market-id>"}}'
+```
 
-- `verify.py` — the verification harness; one gate per build phase.
-- `docs/VERIFICATION_LEDGER.md` — every external fact (API shapes, OKX
-  integration mechanics, chain facts) verified live, with evidence and dates.
-- `src/rwoo/` — the engine, built out phase by phase:
-  - `models.py` — the canonical market object.
-  - `domain.py` — deterministic weather/economics/sports/other routing.
-  - `parsers.py` — venue-agnostic structured parsers that convert included
-    markets into engine inputs, with explicit missing reasons when a source,
-    parser, or model is not yet wired.
-  - `coverage.py` — deterministic family/shape/status coverage registry for
-    included markets.
-  - `readers/kalshi.py`, `readers/polymarket.py`, `readers/limitless.py` —
-    Stage 1 market readers. Limitless flattens grouped markets but remains
-    read-only.
-  - `weather_stations.py` — verified station registry (Kalshi series -> lat/lon).
-  - `engines/weather.py` — Stage 2 weather engine: multi-model ensemble
-    consensus + confidence, plus a NASA POWER historical base rate. No LLM
-    anywhere in this path — verified by an AST import check in the harness.
-  - `economic_sources.py` — official Cleveland Fed nowcast and Philadelphia
-    Fed SPF probability-distribution readers.
-  - `engines/economics.py` — official-history baseline plus official
-    forward-looking Cleveland Fed/SPF inputs for core-CPI markets, and BLS
-    CPI-U paths for US headline-CPI (monthly + annual) bins. Also prices
-    quarterly/annual GDP (Atlanta Fed GDPNow / Philadelphia Fed SPF),
-    unemployment (U-3) and payrolls (FRED), Fed target range (only when no
-    scheduled FOMC meeting remains before the target, else refuses), and
-    single-quarter real-GDP-decline recession markets (SPF RECESS anxious
-    index). NBER-style recession, non-US CPI, and PPI stay source_missing.
-  - `engines/sports.py` — World Football Elo + official FIFA ranking baselines
-    plus deterministic 48-team tournament simulators.
-  - `edge.py` — Stage 3: edge = oracle_prob - implied_prob, qualified against
-    the oracle's own uncertainty band, source freshness, source/model agreement,
-    and real trading friction (Kalshi's published fee formula + the live
-    spread). Limitless friction uses the live spread plus the conservative
-    upper bound of Limitless's official published taker buy-fee table, so a
-    Limitless edge is quantified and can be actionable; the exact per-order fee
-    is an execution-time reconciliation. Refuses non-actionable edges.
-  - `calibration.py` — Brier score, reliability buckets, and transparent
-    recalibration utilities with domain/band breakdowns and sample counts.
-  - `identity.py` — stable independent-event grouping and model versions.
-  - `explanations.py` — deterministic why traces exposing model disagreement.
-  - `cross_venue.py` — fail-closed contract-equivalence and executable edge analysis.
-  - `evidence.py` — append-only precommitment, multi-venue resolution,
-    calibration reports, and fixed promotion checkpoints.
-  - `official_outcomes.py` — direct authoritative-source concordance checks,
-    beginning with NOAA NCEI high/low observations.
-  - `trades.py` — approval/fill/settlement/P&L receipts; it does not hold keys
-    or submit orders.
-  - `backtests/weather.py` — no-cap weather calibration backtest across all
-    verified stations, using finalized Kalshi markets plus Open-Meteo Single
-    Runs forecasts available before market open.
-  - `backtests/economics.py` — no-cap core-CPI calibration backtest using the
-    real BLS release-date schedule for a genuine no-lookahead cutoff.
-  - `backtests/sports_elo.py` — self-computed historical Elo ratings replayed
-    from a real 49,506-match public dataset (no public API gives national-team
-    Elo by arbitrary past date).
-  - `backtests/sports.py` — sports calibration backtest scoring real resolved
-    Polymarket tournament markets against as-of-date self-computed ratings.
-  - `receipts.py` — canonical JSON, real keccak256 commitments, and an
-    append-only hash-chained ledger with a tamper test.
-  - `daily.py` — receipt-backed daily proof loop and public JSON/Markdown
-    artifact generation.
-  - `scanner.py` — live opportunity scanner that ranks cost-adjusted
-    actionable candidates and writes `data/public/opportunity_scan_latest.*`.
-    It now reports venue/domain/family/status counts, included unsupported
-    domain records, and skip reasons so market visibility does not masquerade
-    as trade support.
-  - `xlayer.py` — X Layer RPC verification and on-chain anchor verification
-    (decodes the ERC-4337 `UserOperationEvent` to confirm the inner call
-    actually succeeded — an outer bundler-transaction receipt status alone is
-    not sufficient proof, learned the hard way; see Ledger §16.1).
-  - (OKX listing, authenticated execution adapter, public UI — gated later work)
-- `CREDITS.md` — attribution for third-party data sources and libraries.
-- `LICENSE` — MIT.
+### `rwoo.cross_venue_edge`
+
+Compare two candidate-equivalent contracts.
+
+```http
+POST /v1/cross-venue-edge
+Content-Type: application/json
+
+{
+  "left": {"venue": "kalshi", "market_id": "<left-id>"},
+  "right": {"venue": "polymarket", "market_id": "<right-id>"}
+}
+```
+
+Only exact agreement on event semantics, resolution authority, resolution
+time, and YES orientation can qualify. Similar titles are not enough. Results
+remain subject to fill, custody, venue, cancellation, and settlement risk.
+
+### `rwoo.get_calibration`
+
+Read the public evidence record.
+
+```bash
+curl -sS https://api.trueodd.xyz/v1/calibration
+curl -sS https://api.trueodd.xyz/v1/calibration/weather.temperature
+```
+
+The report exposes independent event counts, correlated contract-row counts,
+Brier scores, reliability bands, official-source concordance, market
+benchmarking, cost-adjusted performance, drift monitoring, fixed-checkpoint
+reviews, and the execution interlock.
+
+## Domain coverage
+
+### Weather — flagship
+
+The weather engine supports registered US observation stations and binds the
+venue series to a station, target date, metric, and strike before computing a
+probability.
+
+- multi-model forecast ensemble;
+- daily maximum and minimum temperature;
+- precipitation paths where the market rule is supported;
+- explicit ensemble disagreement and uncertainty interval;
+- station-specific identity carried into the receipt;
+- NOAA NCEI Daily Summaries outcome verification;
+- v3 power recalibration derived from grouped walk-forward evidence;
+- drift monitoring by station, metric, horizon, and warm/cool season.
+
+The current production model is
+`weather-ensemble-v3-power-calibrated`. Results from earlier weather versions
+cannot promote v3.
+
+### Economic data
+
+Economic engines are bound to official definitions and release schedules.
+Implemented paths include:
+
+- headline and core CPI bins and thresholds;
+- quarterly and annual GDP structures;
+- unemployment and payroll markets;
+- constrained Fed target-range paths;
+- single-quarter real-GDP-decline recession structures.
+
+Sources include BLS releases and history, Cleveland Fed nowcasts,
+Philadelphia Fed Survey of Professional Forecasters distributions, Atlanta
+Fed GDPNow, FRED series, and other explicit official inputs. NBER declaration
+markets, unsupported non-US releases, PPI, or rate paths lacking an adequate
+forward distribution fail closed instead of borrowing an unrelated proxy.
+
+### Sports
+
+Sports engines use explicit ratings and deterministic simulation.
+
+- World Football Elo;
+- official FIFA ranking inputs;
+- 48-team World Cup tournament simulation;
+- historical tournament calibration;
+- supported tennis, NBA, MLB, and club-soccer structures behind coverage
+  checks.
+
+Props, esports, unsupported league champions, and unparsed composite markets
+remain visible in scan coverage but cannot be labeled actionable.
+
+## Real-money decision discipline
+
+An apparent edge is not actionable merely because
+`oracle_probability != market_probability`. It must survive:
+
+1. exact market-rule, source, time, entity, strike, and YES-side binding;
+2. valid and sufficiently fresh source data;
+3. minimum model agreement;
+4. the oracle's own probability interval;
+5. executable bid/ask pricing rather than last-trade price;
+6. spread and quantified venue fees;
+7. positive net expected value;
+8. family- and model-specific evidence status.
+
+Kalshi uses its published quadratic taker-fee formula. Limitless uses a
+conservative bound derived from its published taker-fee table until an exact
+execution fee is available. Missing fee information is disclosed and can
+force refusal.
+
+The API can be called by agents operating real-money strategies today. The
+oracle's own funded order path remains independently gated; callers retain
+responsibility for their orders, custody, sizing, venue access, and losses.
+
+## Evidence, calibration, and promotion
+
+The production evidence loop runs every six hours:
+
+1. collect every priced supported forecast;
+2. append a pre-resolution market quote snapshot;
+3. commit the probability, model version, rule hash, source, interval, market
+   price, side, and execution economics;
+4. resolve finalized Kalshi, Polymarket, and Limitless contracts;
+5. retry supported NOAA outcome verification until official data arrives;
+6. preserve the latest genuine pre-resolution quote as a closing benchmark;
+7. regenerate public calibration and promotion reports.
+
+Multiple strike contracts for one underlying location/date/metric or sporting
+event remain visible, but they share an independent event-group identity and
+cannot inflate the primary evidence count.
+
+Weather v3 is reassessed at fixed checkpoints of 30, 100, 250, and 500
+independent resolved events. Promotion requires all applicable controls:
+
+- at least 30 independent v3 events;
+- Brier score at most `0.20`;
+- maximum calibration gap at most `0.15`;
+- NOAA/venue concordance at least `95%`;
+- every probability band with at least 30 independent groups within the
+  calibration-gap limit;
+- oracle Brier score better than the recorded market benchmark;
+- positive cost-adjusted strategy result after entry price, spread, and fees;
+- no adequately sampled station, metric, horizon, or weather-regime drift
+  alert;
+- valid evidence ledger.
+
+Evidence gates are not weakened to force a launch result. A failure keeps the
+family locked and becomes a diagnostic input for the next model version.
+
+## Funded execution interlock
+
+The repository contains an auditable trade lifecycle, but it does not store
+venue keys or autonomously submit orders. A funded trade precommit is rejected
+unless the operator explicitly enables execution and the current family report
+passes every gate.
+
+Additional controls include:
+
+- report age limited to 12 hours, otherwise automatic re-lock;
+- append-only operator kill switch;
+- explicit operator approval ID;
+- limit orders only;
+- one position per independent event;
+- mandatory correlation-group identity and exposure ceiling;
+- checkpoint-tier position, daily exposure, and trailing-seven-day loss caps;
+- genuine venue order ID required before a fill can be recorded;
+- duplicate-fill and duplicate-settlement rejection;
+- realized P&L calculated from recorded fills, fees, and official settlement.
+
+| Passed checkpoint | Maximum position | Correlated exposure | Daily exposure | Trailing 7-day loss |
+| ---: | ---: | ---: | ---: | ---: |
+| 30 | $5 | $5 | $15 | $25 |
+| 100 | $10 | $15 | $30 | $50 |
+| 250 | $20 | $30 | $60 | $100 |
+| 500 | $50 | $75 | $150 | $250 |
+
+These values are hard ceilings. An operator or integrating agent can impose
+smaller limits.
+
+## Deterministic-Core Law
+
+Every probability is produced by deterministic code operating on identified
+data. A language model may classify a request or narrate a result, but it may
+not create, alter, veto, or “sanity-check” a probability.
+
+The project enforces these invariants:
+
+- missing data remains missing, never zero;
+- unsupported markets fail closed;
+- model agreement is not presented as empirical calibration;
+- each successful or refused decision is auditable;
+- model changes receive a new version;
+- earlier-version results cannot validate a later version;
+- losses and non-actionable forecasts remain in the evidence record;
+- evidence and decision ledgers are append-only and hash chained.
+
+## Receipts and integrity
+
+Receipts use canonical JSON and keccak256 in an append-only hash chain. Each
+record commits its sequence, type, payload, creation time, previous hash, and
+record hash. Verification detects deletion, mutation, insertion, or reordering.
+
+Receipt lookup and verification are available through the API. X Layer anchor
+verification additionally checks the inner ERC-4337 operation rather than
+treating an outer bundler receipt as sufficient proof.
+
+## Opportunity scanner
+
+The scanner pulls broad live inventories from Kalshi, Polymarket, and
+Limitless, evaluates supported markets, and publishes ranked JSON and Markdown
+artifacts under `data/public/`.
+
+Every included market receives an honest coverage state:
+
+- `actionable`;
+- `wait`;
+- `model_missing`;
+- `parse_missing`;
+- `source_missing`;
+- `fee_missing`.
+
+Visibility is not presented as model support. Unsupported records remain in
+coverage diagnostics so development priorities follow actual market supply.
+
+## Local setup
+
+Python 3.12 is used in production.
+
+```bash
+python3 -m venv .venv
+. .venv/bin/activate
+pip install -r requirements.txt
+PYTHONPATH=src python -m unittest discover -q
+```
+
+Run the scanner and evidence loop:
+
+```bash
+PYTHONPATH=src python -m rwoo.scanner --write --top 30
+PYTHONPATH=src python -m rwoo.evidence run
+```
+
+Run individual verification phases:
+
+```bash
+python3 verify.py --phase 0
+python3 verify.py --phase 1
+python3 verify.py --phase 2
+python3 verify.py --phase 3
+python3 verify.py --phase 4
+python3 verify.py --phase 5
+python3 verify.py --phase 6
+python3 verify.py --phase 7
+python3 verify.py --phase 8
+python3 verify.py --phase 9
+```
+
+These phases exercise live sources where required and print explicit
+acceptance results. Tests under `tests/` remain deterministic and network-free.
+
+## Production architecture
+
+```text
+Venue readers ──> canonical market + exact resolution rule
+                         │
+Domain router ──> deterministic weather/economics/sports engine
+                         │
+                  probability + interval
+                         │
+Executable quote ──> spread + fee + net edge qualification
+                         │
+                   agent API response
+                         │
+             decision receipt + evidence precommit
+                         │
+Venue settlement + official outcome verification
+                         │
+Calibration + benchmark + drift + promotion report
+                         │
+                  execution interlock
+```
+
+Production uses hardened systemd services bound to localhost behind nginx:
+
+- `rwoo-api.service` — FastAPI decision service;
+- `rwoo-site.service` — public product site;
+- `rwoo-scan.timer` — live market scan every 30 minutes;
+- `rwoo-evidence.timer` — evidence and resolution cycle every six hours.
+
+Public traffic is HTTPS-only. Application ports are not exposed publicly.
+
+## Repository map
+
+- `src/rwoo/readers/` — Kalshi, Polymarket, and Limitless readers.
+- `src/rwoo/engines/weather.py` — weather ensemble and v3 recalibration.
+- `src/rwoo/engines/economics.py` — official economic-data models.
+- `src/rwoo/engines/sports.py` — sports ratings and simulations.
+- `src/rwoo/parsers.py` — structured market-rule parsing.
+- `src/rwoo/coverage.py` — coverage classification and refusal states.
+- `src/rwoo/edge.py` — executable-price and trading-cost qualification.
+- `src/rwoo/evidence.py` — precommitment, resolution, benchmarking, drift,
+  calibration, and promotion.
+- `src/rwoo/official_outcomes.py` — NOAA authoritative outcome checks.
+- `src/rwoo/calibration.py` — Brier, reliability, and grouped walk-forward
+  utilities.
+- `src/rwoo/cross_venue.py` — exact-equivalence and complementary-edge checks.
+- `src/rwoo/receipts.py` — canonical commitments and hash-chain verification.
+- `src/rwoo/trades.py` — approval, limits, kill switch, fills, settlement, and
+  realized P&L.
+- `src/rwoo/api/` — public API, schemas, payment gate, and receipts.
+- `src/rwoo/site/` — public web application.
+- `deploy/systemd/` — production timer and service definitions.
+- `docs/EVIDENCE_AND_EXECUTION.md` — evidence and funded-execution policy.
+- `docs/VERIFICATION_LEDGER.md` — external assumptions and verification record.
+- `verify.py` — phased live verification harness.
+
+## Current operating state
+
+- Public site and API are live.
+- Weather v3 is producing forecasts and accumulating independently resolved
+  evidence.
+- Scanner and evidence timers are active.
+- Public calibration and ledger verification are available.
+- Funded execution inside this repository is locked until the model-specific
+  gates pass and the operator explicitly enables it.
+- External agents may call the API for real-money decision workflows now; they
+  remain responsible for independent risk controls and all resulting orders.
+
+## Important limitation
+
+Probabilities are estimates, not promises. No model can guarantee a market
+outcome or profit. Data errors, venue outages, liquidity, slippage, model
+misspecification, correlated exposure, rule interpretation, settlement, and
+custody can all produce losses. The purpose of this build is to make those
+risks measurable, visible, and enforceable rather than hiding them behind a
+confident number.
+
+## License and attribution
+
+Licensed under MIT. See `LICENSE` and `CREDITS.md` for source and dependency
+attribution.

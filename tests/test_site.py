@@ -109,7 +109,7 @@ class LiveDataTests(unittest.TestCase):
         html = c.get("/").text
         self.assertIn(q, html)          # the real question, verbatim
         self.assertIn("71.0%", html)    # oracle_prob from the artifact, not hardcoded
-        self.assertIn("weather-ensemble-v2", html)  # model version derived from family
+        self.assertIn("weather-ensemble-v3-power-calibrated", html)  # model version derived from family
 
     def test_landing_empty_when_no_scan(self):
         c = client(settings_for(self.tmp))  # no scan file

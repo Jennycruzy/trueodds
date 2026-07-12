@@ -1,16 +1,91 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-10 (fifth session: callable ASP HTTP API, OKX Agent
-Payments x402 402 flow, and the public web frontend built + tested + staged on
-the VPS; fourth session: recession-quarter routing wired + tested; third
-session: parser tests, Phase 9 coverage gate, tennis/NBA sources, head-to-head
-YES-side binding)
+Last updated: 2026-07-12 (seventh session: SSH key-only access enabled and the
+legacy public artifact server retired safely; sixth session: DOMAIN LIVE — trueodd.xyz purchased,
+DNS set, and the ASP API + public site deployed to production over HTTPS with
+Let's Encrypt certs on the shared VPS; fifth session: callable ASP HTTP API,
+OKX Agent Payments x402 402 flow, and the public web frontend built + tested +
+staged on the VPS; fourth session: recession-quarter routing wired + tested;
+third session: parser tests, Phase 9 coverage gate, tennis/NBA sources,
+head-to-head YES-side binding)
 
-## 2026-07-10 Session — ASP API, payment flow, and public frontend (RESUME HERE)
+## 2026-07-11 Session — Production deployment on trueodd.xyz (LIVE, RESUME HERE)
 
-The software half of the ASP/listing program is built, tested, and staged. The
-remaining work is **deployment**, which is hard-gated on operator inputs that
-must not be guessed. Pick up at "Next steps when the domain lands" below.
+The service is deployed and reachable over public HTTPS. Domain, DNS, systemd
+services, nginx vhosts, and Let's Encrypt certs are all in place; 145 tests pass
+on the box. Payments remain off (free mode). Remaining work is optional
+hardening/product, not launch-blocking.
+
+### Live production facts
+
+- **Domain**: `trueodd.xyz` (Namecheap, BasicDNS). DNS: `A @` and `A api` ->
+  `38.49.216.59`, `CNAME www -> trueodd.xyz`. Propagated and verified on public
+  resolvers.
+- **Site**: https://trueodd.xyz (+ www) — `rwoo.site.app:app`.
+- **API**: https://api.trueodd.xyz — `rwoo.api.app:app`; `/docs`,
+  `/openapi.json`, `/v1/service-metadata`, health/readiness all 200 externally.
+  HTTP->HTTPS redirect enabled.
+- **Certs**: separate Let's Encrypt certs for `trueodd.xyz`+`www` and
+  `api.trueodd.xyz` (expire 2026-10-09); certbot auto-renew timer active;
+  targeted `--dry-run` per cert passes.
+- **Runtime**: two hardened systemd units (`User=rwoo`, localhost-bound behind
+  nginx, auto-restart, ProtectSystem=strict):
+  - `rwoo-api.service` -> `uvicorn rwoo.api.app:app` on `127.0.0.1:8090`
+  - `rwoo-site.service` -> `uvicorn rwoo.site.app:app` on `127.0.0.1:8091`
+- **Config**: `/etc/rwoo/rwoo.env` (root:root 0640, read by systemd). trueodd
+  URLs; `RWOO_SUPPORT_EMAIL=jennyoliver630@gmail.com`;
+  `RWOO_LEGAL_ENTITY=Jennycruzy`; artifact reads point at the live scan/evidence
+  output in `/opt/rwoo/current/data`; decision receipts written to
+  `/opt/rwoo/staging/data/receipts/decision_receipts.jsonl`. Payments OFF.
+- **Code**: `/opt/rwoo/staging` fast-forwarded to `f3bb14a` (has site + api);
+  its own venv has fastapi/uvicorn/jinja2/pycryptodome/httpx; 145 tests pass on
+  the box.
+- **nginx**: added only `trueodd` (site) and `trueodd-api` (API) vhosts —
+  explicit `server_name`, no `default_server`, `underscores_in_headers on` and
+  no caching on the API path to preserve x402/idempotency/request-id headers.
+  The 9 other tenants were not modified and were re-verified healthy.
+- **Not implemented**: no A2A (Agent2Agent) daemon or agent card — the surface
+  is REST + x402 only (`/.well-known/agent.json` is 404 by design). Machine
+  discovery is the REST `/v1/service-metadata` catalog.
+
+### 2026-07-12 operational hardening completed
+
+- Installed and verified a dedicated Ed25519 key for root administration.
+- Root SSH remains allowed by public key only; password and
+  keyboard-interactive SSH authentication are disabled. The root account
+  password itself was not changed.
+- Retired `rwoo-artifacts.service`: disabled and stopped after confirming that
+  nginx, the API, site, scan timer, and evidence timer had no dependency on it.
+- Removed the public `8088/tcp` UFW allowances for both IPv4 and IPv6. Ports
+  8090 and 8091 remain localhost-only, and public site/API HTTPS health checks
+  passed after the change.
+
+### Remaining (optional / non-launch-blocking)
+
+1. **Payments go-live**: still needs OKX network+asset+decimals, pay-to
+   recipient, per-service prices, facilitator URL + verify schema. Until then
+   the two paid services (`check-market`, `cross-venue-edge`) answer free; the
+   `calibration` service is free by design (public track record).
+2. **Support email** is a personal Gmail; swap for a dedicated address if wanted.
+3. **A2A layer** if agent-ecosystem discovery is required (agent card +
+   JSON-RPC adapter over the existing three services).
+4. **OKX.AI listing package** can now be assembled from the live URLs. This is
+   the immediate non-payment product step.
+
+### Shared-box note (do NOT touch)
+
+`concrete-academy` (upstream `:3003`) and `kairos-engine` (upstream `:3002`)
+were already returning 502 before this session — their own backends are down,
+unrelated to rwoo, and were left alone. No changes to the other tenants' nginx,
+certs, ufw, docker, postgres, ollama, or pm2.
+
+---
+
+## 2026-07-10 Session — ASP API, payment flow, and public frontend (DEPLOYED 2026-07-11)
+
+The software half of the ASP/listing program was built, tested, and staged this
+session; it was **deployed to production on trueodd.xyz on 2026-07-11** (see the
+LIVE section above). The build details below remain accurate.
 
 ### Done this session (145 tests pass: 94 existing + 23 API + 17 payment + 11 site)
 
@@ -52,7 +127,11 @@ must not be guessed. Pick up at "Next steps when the domain lands" below.
   `:8088`) and all other tenants on the shared box were left untouched. Nothing
   is publicly exposed yet.
 
-### Blocked — operator inputs still needed (do not guess)
+### Blocked — operator inputs still needed (do not guess) — RESOLVED 2026-07-11
+
+(Historical. 1 domain -> trueodd.xyz; 2 support email -> jennyoliver630@gmail.com;
+3 legal entity -> Jennycruzy; 4 payments still deferred (off); 5 root-password
+rotation still outstanding.)
 
 1. **Dedicated domain** (leaning `.xyz` or `.ai`) + DNS access. DNS: `A @` and
    `A api` → `38.49.216.59`, `CNAME www`.
@@ -64,7 +143,15 @@ must not be guessed. Pick up at "Next steps when the domain lands" below.
 5. **Security:** rotate the VPS root password (was shared in chat); prefer SSH
    keys.
 
-### Next steps when the domain lands (deploy sequence)
+### Next steps when the domain lands (deploy sequence) — EXECUTED 2026-07-11
+
+(Historical record of the plan that was carried out. Steps 1-7 done; step 8
+listing package is now assemblable. Deviations: apps run directly from
+`/opt/rwoo/staging` with its own venv via new `rwoo-api`/`rwoo-site` units rather
+than an atomic `staging -> current` promotion, so the live scan/evidence loop in
+`current` was left untouched; the site reads live artifacts from
+`/opt/rwoo/current/data` via absolute env paths. certbot used the `--nginx`
+plugin, not webroot.)
 
 1. Get domain + support email + Cloudflare yes/no (recommend BasicDNS first).
 2. Set env for both apps: `RWOO_PUBLIC_BASE_URL=https://<domain>`,

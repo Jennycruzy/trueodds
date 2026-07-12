@@ -1,5 +1,7 @@
 import tempfile
 import unittest
+import json
+from datetime import datetime, timezone
 from dataclasses import replace
 from pathlib import Path
 
@@ -34,8 +36,16 @@ class OracleUpgradeTests(unittest.TestCase):
 
     def test_real_trade_ledger_never_counts_recommendation_as_fill(self):
         with tempfile.TemporaryDirectory() as tmp:
-            ledger = RealTradeLedger(Path(tmp) / "trades.jsonl")
-            precommit = ledger.precommit(recommendation={"actionable": True, "market_id": "m"}, risk_limits={"max_usd": 2}, operator_approval_id="approval-1")
+            report = Path(tmp) / "report.json"
+            report.write_text(json.dumps({"created_at": datetime.now(timezone.utc).isoformat(),
+                "promotion_readiness": {"weather.temperature": {
+                "eligible": True, "execution_interlock": "unlocked", "last_reassessed_checkpoint": 30}}}))
+            ledger = RealTradeLedger(Path(tmp) / "trades.jsonl", funded_execution_enabled=True,
+                                     promotion_report_path=report)
+            precommit = ledger.precommit(recommendation={"actionable": True, "market_id": "m",
+                "event_group_id": "weather:event-1", "correlation_group_id": "weather:ny:2026-01-01",
+                "order_type": "limit"},
+                risk_limits={"max_usd": 2}, operator_approval_id="approval-1")
             self.assertEqual(ledger.summary()["real_trades_filled"], 0)
             ledger.record_fill(trade_id=precommit.payload["trade_id"], venue_order_id="order-1", side="YES", contracts=2, fill_price=.4, fees=.02)
             ledger.settle(trade_id=precommit.payload["trade_id"], outcome=1, settlement_reference="official-result")
@@ -43,6 +53,26 @@ class OracleUpgradeTests(unittest.TestCase):
             self.assertEqual(summary["real_trades_settled"], 1)
             self.assertAlmostEqual(summary["realized_pnl"], 1.18)
             self.assertFalse(summary["paper_trades_included"])
+
+    def test_real_trade_precommit_is_locked_by_default(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = RealTradeLedger(Path(tmp) / "trades.jsonl")
+            with self.assertRaises(PermissionError):
+                ledger.precommit(recommendation={"actionable": True}, risk_limits={"max_usd": 1},
+                                 operator_approval_id="approval-1")
+
+    def test_kill_switch_overrides_an_eligible_report(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            report = Path(tmp) / "report.json"
+            report.write_text(json.dumps({"created_at": datetime.now(timezone.utc).isoformat(),
+                "promotion_readiness": {"weather.temperature": {"eligible": True,
+                "execution_interlock": "unlocked", "last_reassessed_checkpoint": 30}}}))
+            ledger = RealTradeLedger(Path(tmp) / "trades.jsonl", funded_execution_enabled=True,
+                                     promotion_report_path=report)
+            ledger.activate_kill_switch("operator stop", "approval-stop")
+            self.assertFalse(ledger.execution_gate()["allowed"])
+            ledger.clear_kill_switch("approval-resume")
+            self.assertTrue(ledger.execution_gate()["allowed"])
 
 
 if __name__ == "__main__":

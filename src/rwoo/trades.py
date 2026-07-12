@@ -7,7 +7,8 @@ being misrepresented as a real trade.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+import json
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -15,18 +16,108 @@ from rwoo.receipts import AppendOnlyLedger, hash_hex
 
 
 class RealTradeLedger:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, funded_execution_enabled: bool = False,
+                 promotion_report_path: str | Path | None = None,
+                 required_family: str = "weather.temperature"):
         self.ledger = AppendOnlyLedger(path)
+        self.funded_execution_enabled = funded_execution_enabled
+        self.promotion_report_path = Path(promotion_report_path) if promotion_report_path else None
+        self.required_family = required_family
+
+    def execution_gate(self) -> dict[str, Any]:
+        records = self.ledger.read_records()
+        kill_events = [r for r in records if r.record_type in {"execution_kill_switch", "execution_kill_switch_cleared"}]
+        if kill_events and kill_events[-1].record_type == "execution_kill_switch":
+            return {"allowed": False, "reason": "execution kill switch is active",
+                    "kill_switch": kill_events[-1].payload}
+        if not self.funded_execution_enabled:
+            return {"allowed": False, "reason": "funded execution is disabled by operator configuration"}
+        if self.promotion_report_path is None or not self.promotion_report_path.exists():
+            return {"allowed": False, "reason": "promotion report is missing"}
+        try:
+            report = json.loads(self.promotion_report_path.read_text(encoding="utf-8"))
+            promotion = (report.get("promotion_readiness") or {}).get(self.required_family) or {}
+        except (OSError, ValueError):
+            return {"allowed": False, "reason": "promotion report is unreadable"}
+        if not promotion.get("eligible") or promotion.get("execution_interlock") != "unlocked":
+            return {"allowed": False, "reason": "all evidence, benchmark, calibration, and drift gates have not passed"}
+        try:
+            age = datetime.now(timezone.utc) - datetime.fromisoformat(report["created_at"].replace("Z", "+00:00"))
+        except (KeyError, TypeError, ValueError):
+            return {"allowed": False, "reason": "promotion report timestamp is invalid"}
+        if age > timedelta(hours=12):
+            return {"allowed": False, "reason": "promotion report is stale; execution automatically re-locked"}
+        checkpoint = int(promotion.get("last_reassessed_checkpoint") or 0)
+        tiers = {
+            30: {"max_position_usd": 5.0, "max_correlated_exposure_usd": 5.0, "max_daily_exposure_usd": 15.0, "max_weekly_loss_usd": 25.0},
+            100: {"max_position_usd": 10.0, "max_correlated_exposure_usd": 15.0, "max_daily_exposure_usd": 30.0, "max_weekly_loss_usd": 50.0},
+            250: {"max_position_usd": 20.0, "max_correlated_exposure_usd": 30.0, "max_daily_exposure_usd": 60.0, "max_weekly_loss_usd": 100.0},
+            500: {"max_position_usd": 50.0, "max_correlated_exposure_usd": 75.0, "max_daily_exposure_usd": 150.0, "max_weekly_loss_usd": 250.0},
+        }
+        tier_checkpoint = max((n for n in tiers if checkpoint >= n), default=0)
+        if not tier_checkpoint:
+            return {"allowed": False, "reason": "no passed execution checkpoint"}
+        return {"allowed": True, "reason": "operator enabled execution and every promotion gate is unlocked",
+                "checkpoint": tier_checkpoint, "limits": tiers[tier_checkpoint]}
+
+    def activate_kill_switch(self, reason: str, operator_approval_id: str) -> Any:
+        if not reason.strip() or not operator_approval_id.strip():
+            raise ValueError("kill switch requires a reason and operator approval id")
+        return self.ledger.append("execution_kill_switch", {
+            "reason": reason, "operator_approval_id": operator_approval_id, "status": "active"})
+
+    def clear_kill_switch(self, operator_approval_id: str) -> Any:
+        if not operator_approval_id.strip():
+            raise ValueError("clearing kill switch requires operator approval")
+        return self.ledger.append("execution_kill_switch_cleared", {
+            "operator_approval_id": operator_approval_id, "status": "cleared"})
 
     def _events(self, trade_id: str) -> list:
         return [r for r in self.ledger.read_records() if r.payload.get("trade_id") == trade_id]
 
     def precommit(self, *, recommendation: dict[str, Any], risk_limits: dict[str, Any],
                   operator_approval_id: str) -> Any:
+        gate = self.execution_gate()
+        if not gate["allowed"]:
+            raise PermissionError(gate["reason"])
         if not operator_approval_id.strip():
             raise ValueError("real trading requires an explicit operator approval identifier")
         if recommendation.get("actionable") is not True:
             raise ValueError("cannot precommit a non-actionable recommendation")
+        if recommendation.get("order_type") != "limit":
+            raise ValueError("funded execution permits limit orders only")
+        event_group = str(recommendation.get("event_group_id") or "").strip()
+        if not event_group:
+            raise ValueError("recommendation requires an independent event_group_id")
+        correlation_group = str(recommendation.get("correlation_group_id") or "").strip()
+        if not correlation_group:
+            raise ValueError("recommendation requires a correlation_group_id")
+        existing = self.ledger.read_records()
+        if any(r.record_type == "real_trade_precommit" and
+               r.payload.get("recommendation", {}).get("event_group_id") == event_group
+               for r in existing):
+            raise ValueError("only one funded position is allowed per independent event")
+        requested = float(risk_limits.get("max_usd") or 0)
+        if requested <= 0 or requested > gate["limits"]["max_position_usd"]:
+            raise ValueError("position exceeds checkpoint-tier maximum")
+        correlated_exposure = sum(float(r.payload.get("risk_limits", {}).get("max_usd") or 0)
+                                  for r in existing if r.record_type == "real_trade_precommit" and
+                                  r.payload.get("recommendation", {}).get("correlation_group_id") == correlation_group)
+        if correlated_exposure + requested > gate["limits"]["max_correlated_exposure_usd"]:
+            raise ValueError("correlated exposure limit exceeded")
+        now = datetime.now(timezone.utc)
+        today = now.date()
+        daily_exposure = sum(float(r.payload.get("risk_limits", {}).get("max_usd") or 0)
+                             for r in existing if r.record_type == "real_trade_precommit" and
+                             datetime.fromisoformat(r.created_at.replace("Z", "+00:00")).date() == today)
+        if daily_exposure + requested > gate["limits"]["max_daily_exposure_usd"]:
+            raise ValueError("daily exposure limit exceeded")
+        week_start = now - timedelta(days=7)
+        weekly_loss = -sum(min(0.0, float(r.payload.get("realized_pnl") or 0)) for r in existing
+                           if r.record_type == "real_trade_settlement" and
+                           datetime.fromisoformat(r.created_at.replace("Z", "+00:00")) >= week_start)
+        if weekly_loss >= gate["limits"]["max_weekly_loss_usd"]:
+            raise PermissionError("weekly loss limit reached; execution re-locked")
         trade_id = hash_hex({
             "recommendation": recommendation,
             "risk_limits": risk_limits,
@@ -39,6 +130,8 @@ class RealTradeLedger:
             "risk_limits": risk_limits,
             "operator_approval_id": operator_approval_id,
             "status": "approved_not_filled",
+            "checkpoint": gate["checkpoint"],
+            "enforced_limits": gate["limits"],
         })
 
     def record_fill(self, *, trade_id: str, venue_order_id: str, side: str,

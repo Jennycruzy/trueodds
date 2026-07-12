@@ -12,7 +12,7 @@ def priced_record(**updates):
     row = {
         "venue": "kalshi", "market_id": "KXTEST-1", "question": "Will test resolve yes?",
         "domain": "weather", "family": "weather.temperature", "shape": "daily_maximum",
-        "model_version": "weather-ensemble-v2", "event_group_id": "weather.temperature:event1",
+        "model_version": "weather-ensemble-v3-power-calibrated", "event_group_id": "weather.temperature:event1",
         "event_identity": {"target_date": "2026-07-12", "location": "NYC"},
         "fetched_at": "2026-07-10T10:00:00+00:00", "resolution_time": "2026-07-13T00:00:00Z",
         "resolution_rule": "Official rule", "resolution_source": "NOAA/NWS",
@@ -33,6 +33,16 @@ class FakeResponse:
 class FakeClient:
     def __init__(self, market): self.market = market
     def get(self, url): return FakeResponse(self.market)
+
+
+class OfficialClient(FakeClient):
+    def get(self, url, params=None, headers=None):
+        if "ncei.noaa.gov" in url:
+            response = FakeResponse({})
+            response.json = lambda: [{"TMAX": "82"}]
+            response.url = url
+            return response
+        return super().get(url)
 
 
 class EvidencePipelineTests(unittest.TestCase):
@@ -66,6 +76,11 @@ class EvidencePipelineTests(unittest.TestCase):
             self.assertEqual(report["resolved_forecasts"], 1)
             self.assertEqual(report["independent_resolved_event_groups"], 1)
             self.assertTrue(report["ledger_verification"]["valid"])
+            weather = report["promotion_readiness"]["weather.temperature"]
+            self.assertEqual(weather["model_version"], "weather-ensemble-v3-power-calibrated")
+            self.assertEqual(weather["execution_interlock"], "locked")
+            self.assertIn("market_and_paper_performance", weather)
+            self.assertIn("drift_monitoring", weather)
 
     def test_open_market_remains_pending(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -74,6 +89,23 @@ class EvidencePipelineTests(unittest.TestCase):
             result = store.resolve_pending(FakeClient({"status": "open", "result": ""}))
             self.assertEqual(result["pending"], 1)
             self.assertEqual(store.report()["resolved_forecasts"], 0)
+
+    def test_official_weather_check_retries_after_venue_resolution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.jsonl")
+            identity = {
+                "target_date": "2026-07-12", "metric": "temperature_2m_max",
+                "station_ghcnd_id": "GHCND:USW00094728", "strike_type": "greater",
+                "floor_strike": 80, "cap_strike": None,
+            }
+            store.collect_scan({"top": [priced_record(event_identity=identity)]})
+            store.resolve_pending(OfficialClient({"status": "finalized", "result": "yes"}))
+            result = store.verify_official_sources(OfficialClient({}))
+            self.assertEqual(result["resolved"], 1)
+            promotion = store.report()["promotion_readiness"]["weather.temperature"]
+            self.assertEqual(promotion["official_source_checks"], 1)
+            self.assertEqual(promotion["official_source_concordance_rate"], 1.0)
+            self.assertEqual(store.verify_official_sources(OfficialClient({}))["checked"], 0)
 
     def test_nonpriced_records_are_not_precommitted(self):
         with tempfile.TemporaryDirectory() as tmp:

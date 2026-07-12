@@ -7,7 +7,7 @@ from rwoo.weather_stations import metric_for_series, station_for_series
 
 
 MODEL_VERSIONS = {
-    "weather.temperature": "weather-ensemble-v2",
+    "weather.temperature": "weather-ensemble-v3-power-calibrated",
     "weather.precipitation": "weather-hurdle-v2",
     "economics.core_cpi": "core-cpi-official-ensemble-v2",
     "economics.headline_cpi": "headline-cpi-official-ensemble-v2",
