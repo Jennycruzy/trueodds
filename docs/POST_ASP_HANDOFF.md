@@ -40,7 +40,10 @@ be guessed by the coding agent.
 
 The production `rwoo-evidence.timer` runs every six hours. It precommits priced
 forecasts, checks finalized venue outcomes, performs supported NOAA station
-concordance, and refreshes the calibration report.
+concordance, and refreshes the calibration report. `rwoo-closing-quotes.timer`
+commits the fresh scanner quotes every 30 minutes, while
+`rwoo-closing-quotes-near.timer` targets only the final trading hour every five
+minutes. Both write to the same locked append-only evidence chain.
 
 Expected evidence sequence:
 

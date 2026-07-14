@@ -30,6 +30,7 @@ WEATHER_PRODUCTION_MODEL = MODEL_VERSIONS["weather.temperature"]
 CHECKPOINTS = (30, 100, 250, 500)
 MIN_BAND_GROUPS = 30
 MIN_DRIFT_GROUPS = 20
+MIN_CLOSING_PRICE_GROUP_COVERAGE = 0.80
 
 
 def _now() -> str:
@@ -88,6 +89,8 @@ def _quote_before_cutoff(quote: dict[str, Any], forecast: dict[str, Any] | None)
         cutoffs.append(forecast.get("resolution_time"))
     try:
         observed_at = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
     except (TypeError, ValueError):
         return False
     for raw in cutoffs:
@@ -102,23 +105,6 @@ def _quote_before_cutoff(quote: dict[str, Any], forecast: dict[str, Any] | None)
         if observed_at > cutoff:
             return False
     return True
-
-
-def _closing_probability(venue: str, market: dict[str, Any]) -> tuple[float | None, str | None]:
-    """Best available final pre-settlement market quote; never invent one."""
-    if venue == "kalshi":
-        bid, ask = _float_or_none(market.get("yes_bid")), _float_or_none(market.get("yes_ask"))
-        if bid is not None and ask is not None and bid <= ask and 0 < (bid + ask) / 2 < 1:
-            return (bid + ask) / 2, "final Kalshi yes bid/ask midpoint returned at resolution check"
-        last = _float_or_none(market.get("last_price"))
-        return (last, "final Kalshi last price returned at resolution check") if last is not None and 0 < last < 1 else (None, None)
-    if venue == "limitless":
-        for key in ("price", "lastPrice", "probability"):
-            value = _float_or_none(market.get(key))
-            if value is not None and 0 < value < 1:
-                return value, f"final Limitless {key} returned at resolution check"
-    # Polymarket's resolved 0/1 outcomePrices are settlement, not a closing forecast.
-    return None, None
 
 
 def _band_gate(records: list[CalibrationRecord]) -> dict[str, Any]:
@@ -143,7 +129,10 @@ def _market_performance(rows: list[dict[str, Any]]) -> dict[str, Any]:
     if not rows:
         return {"contract_rows": 0, "oracle_brier": None, "market_brier": None,
                 "oracle_brier_advantage": None, "closing_price_rows": 0,
-                "closing_market_brier": None,
+                "closing_market_brier": None, "closing_price_event_groups": 0,
+                "closing_price_group_coverage": 0.0,
+                "closing_subset_oracle_brier": None,
+                "closing_oracle_brier_advantage": None,
                 "paper_strategy": {"selection": "highest expected-profit actionable contract per independent event",
                                    "trades": 0, "wins": 0, "net_pnl_per_one_contract": 0.0,
                                    "return_on_cost": None, "positive_after_fees_and_spread": False,
@@ -155,6 +144,10 @@ def _market_performance(rows: list[dict[str, Any]]) -> dict[str, Any]:
     closing_rows = [r for r in rows if _float_or_none(r["resolution"].get("closing_market_implied_prob")) is not None]
     closing_brier = (sum((r["resolution"]["closing_market_implied_prob"] - r["resolution"]["outcome"]) ** 2
                          for r in closing_rows) / len(closing_rows)) if closing_rows else None
+    closing_oracle_brier = (sum((r["forecast"]["oracle_prob"] - r["resolution"]["outcome"]) ** 2
+                                for r in closing_rows) / len(closing_rows)) if closing_rows else None
+    all_groups = {r["forecast"]["event_group_id"] for r in rows}
+    closing_groups = {r["forecast"]["event_group_id"] for r in closing_rows}
     # One paper position per independent event prevents threshold-rich events
     # from masquerading as many independent profitable bets.
     candidates: dict[str, dict[str, Any]] = {}
@@ -182,6 +175,12 @@ def _market_performance(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "oracle_brier": oracle_brier, "market_brier": market_brier,
             "oracle_brier_advantage": market_brier - oracle_brier if market_brier is not None else None,
             "closing_price_rows": len(closing_rows), "closing_market_brier": closing_brier,
+            "closing_subset_oracle_brier": closing_oracle_brier,
+            "closing_oracle_brier_advantage": (
+                closing_brier - closing_oracle_brier if closing_brier is not None else None
+            ),
+            "closing_price_event_groups": len(closing_groups),
+            "closing_price_group_coverage": len(closing_groups) / len(all_groups) if all_groups else 0.0,
             "paper_strategy": {"selection": "highest expected-profit actionable contract per independent event",
                                "trades": len(trades), "wins": sum(t["net_pnl"] > 0 for t in trades),
                                "net_pnl_per_one_contract": net, "return_on_cost": net / cost if cost else None,
@@ -242,6 +241,7 @@ class EvidenceStore:
             if "quote_key" in row.payload
         }
         appended = skipped = quotes_appended = prospective_ineligible_skipped = 0
+        pending_records: list[tuple[str, dict[str, Any], dict[str, Any] | None]] = []
         for record in scan["top"]:
             if record.get("oracle_prob") is None:
                 continue
@@ -255,7 +255,7 @@ class EvidenceStore:
             )
             quote_key = ":".join((snapshot_key, forecast_at[:13]))
             if quote_key not in existing_quotes:
-                self.ledger.append("market_quote_snapshot", {
+                quote_payload = {
                     "quote_key": quote_key, "forecast_snapshot_key": snapshot_key,
                     "event_group_id": record["event_group_id"], "venue": record["venue"],
                     "market_id": record["market_id"], "model_version": record["model_version"],
@@ -263,7 +263,14 @@ class EvidenceStore:
                     "spread": record["spread"], "execution": record.get("execution"),
                     "trading_close_time": record.get("trading_close_time"),
                     "event_target_date": (record.get("event_identity") or {}).get("target_date"),
-                })
+                    "yes_bid": (record.get("execution") or {}).get("yes_bid"),
+                    "yes_ask": (record.get("execution") or {}).get("yes_ask"),
+                    "last_trade": None, "depth": {"available": False, "source": "scanner artifact"},
+                    "quote_source": "six-hour evidence scan",
+                    "raw_response_hash": hash_hex(record),
+                    "raw_response_hash_scope": "normalized_scan_record",
+                }
+                pending_records.append(("market_quote_snapshot", quote_payload, None))
                 existing_quotes.add(quote_key)
                 quotes_appended += 1
             if snapshot_key in existing:
@@ -292,14 +299,16 @@ class EvidenceStore:
                 "confidence": record["confidence"],
                 "market_implied_prob": record["implied_prob"],
                 "spread": record["spread"],
+                "trading_close_time": record.get("trading_close_time"),
                 "actionable": record["actionable"],
                 "side": record["side"],
                 "execution": record.get("execution"),
                 "why": record.get("why"),
             }
-            self.ledger.append("forecast_precommit", payload)
+            pending_records.append(("forecast_precommit", payload, None))
             existing.add(snapshot_key)
             appended += 1
+        self.ledger.append_many(pending_records)
         return {"appended": appended, "duplicates_skipped": skipped,
                 "prospective_ineligible_skipped": prospective_ineligible_skipped,
                 "quote_snapshots_appended": quotes_appended, "ledger": self.ledger.verify()}
@@ -308,13 +317,11 @@ class EvidenceStore:
         own_client = client is None
         client = client or httpx.Client(timeout=20)
         precommits = self._records("forecast_precommit")
-        forecasts_by_key = {row.payload.get("snapshot_key"): row.payload for row in precommits}
-        quote_snapshots: dict[str, dict[str, Any]] = {}
+        quote_snapshots: dict[tuple[str, str], list[dict[str, Any]]] = {}
         for quote in self._records("market_quote_snapshot"):
-            key = quote.payload.get("forecast_snapshot_key")
-            if (key and _quote_before_cutoff(quote.payload, forecasts_by_key.get(key))
-                    and (key not in quote_snapshots or quote.payload.get("observed_at", "") > quote_snapshots[key].get("observed_at", ""))):
-                quote_snapshots[key] = quote.payload
+            market_key = (str(quote.payload.get("venue") or ""), str(quote.payload.get("market_id") or ""))
+            if all(market_key):
+                quote_snapshots.setdefault(market_key, []).append(quote.payload)
         resolved_keys = {row.payload["snapshot_key"] for row in self._records("forecast_resolution")}
         resolved = pending = unsupported = errors = 0
         error_breakdown: dict[str, int] = {}
@@ -366,13 +373,19 @@ class EvidenceStore:
                     if outcome is None:
                         pending += 1
                         continue
-                    final_quote = quote_snapshots.get(key)
+                    candidates = [quote for quote in quote_snapshots.get((venue, payload["market_id"]), [])
+                                  if _quote_before_cutoff(quote, payload)]
+                    final_quote = max(candidates, key=lambda quote: quote.get("observed_at", ""), default=None)
                     if final_quote:
                         closing_probability = _float_or_none(final_quote.get("market_implied_prob"))
-                        closing_source = "latest pre-resolution scanner quote"
+                        closing_source = final_quote.get("quote_source") or "latest pre-resolution scanner quote"
                         closing_observed_at = final_quote.get("observed_at")
                     else:
-                        closing_probability, closing_source = _closing_probability(venue, market)
+                        # A quote first observed during the resolution check is
+                        # not demonstrably pre-close. Never relabel it as a
+                        # closing forecast, even if the venue still exposes a
+                        # stale bid/ask or last trade after settlement.
+                        closing_probability, closing_source = None, None
                         closing_observed_at = None
                     official = None
                     if payload["domain"] == "weather":
@@ -667,6 +680,13 @@ class EvidenceStore:
                 "official_source_concordance_at_least_0_95": bool(concordance_rate is not None and concordance_rate >= .95),
                 "all_adequately_sampled_bands_pass": band_gate["all_adequately_sampled_bands_pass"],
                 "beats_market_brier": bool(performance["oracle_brier_advantage"] is not None and performance["oracle_brier_advantage"] > 0),
+                "closing_price_group_coverage_at_least_0_80": (
+                    performance["closing_price_group_coverage"] >= MIN_CLOSING_PRICE_GROUP_COVERAGE
+                ),
+                "beats_closing_market_brier": bool(
+                    performance.get("closing_oracle_brier_advantage") is not None and
+                    performance["closing_oracle_brier_advantage"] > 0
+                ),
                 "paper_return_positive_after_costs": performance["paper_strategy"]["positive_after_fees_and_spread"],
                 "no_drift_alerts": bool(drift is None or drift["passes"]),
             }

@@ -8,10 +8,12 @@ honestly instead of pretending a local hash is an on-chain anchor.
 from __future__ import annotations
 
 import json
+import fcntl
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from contextlib import contextmanager
 
 from Crypto.Hash import keccak
 
@@ -72,7 +74,21 @@ class AppendOnlyLedger:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
-    def read_records(self) -> list[ReceiptRecord]:
+    @property
+    def lock_path(self) -> Path:
+        return self.path.with_suffix(self.path.suffix + ".lock")
+
+    @contextmanager
+    def _lock(self, *, exclusive: bool):
+        self.lock_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.lock_path.open("a", encoding="utf-8") as lock_file:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
+
+    def _read_records_unlocked(self) -> list[ReceiptRecord]:
         if not self.path.exists():
             return []
         records = []
@@ -86,36 +102,45 @@ class AppendOnlyLedger:
                 raise ValueError(f"ledger line {line_no} is not a valid receipt record: {exc}") from exc
         return records
 
+    def read_records(self) -> list[ReceiptRecord]:
+        with self._lock(exclusive=False):
+            return self._read_records_unlocked()
+
     def append(self, record_type: str, payload: dict[str, Any], anchor: dict[str, Any] | None = None) -> ReceiptRecord:
-        records = self.read_records()
-        sequence = len(records) + 1
-        prev_hash = records[-1].chain_hash if records else GENESIS_PREV_HASH
-        created_at = datetime.now(timezone.utc).isoformat()
-        record_hash = hash_hex(
-            {
-                "sequence": sequence,
-                "record_type": record_type,
-                "payload": payload,
-                "created_at": created_at,
-                "prev_hash": prev_hash,
-                "hash_algorithm": HASH_ALGORITHM,
-            }
-        )
-        chain_hash = hash_hex({"prev_hash": prev_hash, "record_hash": record_hash})
-        record = ReceiptRecord(
-            sequence=sequence,
-            record_type=record_type,
-            payload=payload,
-            created_at=created_at,
-            prev_hash=prev_hash,
-            record_hash=record_hash,
-            chain_hash=chain_hash,
-            anchor=anchor,
-        )
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        with self.path.open("a", encoding="utf-8") as fh:
-            fh.write(canonical_json(asdict(record)) + "\n")
-        return record
+        return self.append_many([(record_type, payload, anchor)])[0]
+
+    def append_many(
+        self, rows: list[tuple[str, dict[str, Any], dict[str, Any] | None]],
+    ) -> list[ReceiptRecord]:
+        """Atomically extend the hash chain after reading its head once."""
+        if not rows:
+            return []
+        with self._lock(exclusive=True):
+            existing = self._read_records_unlocked()
+            sequence = len(existing)
+            prev_hash = existing[-1].chain_hash if existing else GENESIS_PREV_HASH
+            appended: list[ReceiptRecord] = []
+            for record_type, payload, anchor in rows:
+                sequence += 1
+                created_at = datetime.now(timezone.utc).isoformat()
+                record_hash = hash_hex({
+                    "sequence": sequence, "record_type": record_type,
+                    "payload": payload, "created_at": created_at,
+                    "prev_hash": prev_hash, "hash_algorithm": HASH_ALGORITHM,
+                })
+                chain_hash = hash_hex({"prev_hash": prev_hash, "record_hash": record_hash})
+                record = ReceiptRecord(
+                    sequence=sequence, record_type=record_type, payload=payload,
+                    created_at=created_at, prev_hash=prev_hash,
+                    record_hash=record_hash, chain_hash=chain_hash, anchor=anchor,
+                )
+                appended.append(record)
+                prev_hash = chain_hash
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with self.path.open("a", encoding="utf-8") as fh:
+                fh.writelines(canonical_json(asdict(record)) + "\n" for record in appended)
+                fh.flush()
+            return appended
 
     def verify(self) -> dict[str, Any]:
         records = self.read_records()

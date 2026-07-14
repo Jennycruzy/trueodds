@@ -274,16 +274,21 @@ responsibility for their orders, custody, sizing, venue access, and losses.
 
 ## Evidence, calibration, and promotion
 
-The production evidence loop runs every six hours:
+The production evidence loop resolves and scores every six hours, while two
+dedicated quote collectors preserve market prices more frequently:
 
 1. collect every priced supported forecast;
-2. append a pre-resolution market quote snapshot;
-3. commit the probability, model version, rule hash, source, interval, market
+2. append a normalized quote from each 30-minute scanner artifact;
+3. refresh markets in their final hour directly from the venue every five
+   minutes, including bid, ask, midpoint, last trade when available, depth
+   metadata, timestamp, and a raw-response hash;
+4. commit the probability, model version, rule hash, source, interval, market
    price, side, and execution economics;
-4. resolve finalized Kalshi, Polymarket, and Limitless contracts;
-5. retry supported NOAA outcome verification until official data arrives;
-6. preserve the latest genuine pre-resolution quote as a closing benchmark;
-7. regenerate public calibration and promotion reports.
+5. resolve finalized Kalshi, Polymarket, and Limitless contracts;
+6. retry supported NOAA outcome verification until official data arrives;
+7. preserve the latest genuine pre-close quote as a closing benchmark for
+   every daily precommit on that venue contract;
+8. regenerate public calibration and promotion reports.
 
 Multiple strike contracts for one underlying location/date/metric or sporting
 event remain visible, but they share an independent event-group identity and
@@ -445,6 +450,9 @@ Production uses hardened systemd services bound to localhost behind nginx:
 - `rwoo-api.service` — FastAPI decision service;
 - `rwoo-site.service` — public product site;
 - `rwoo-scan.timer` — live market scan every 30 minutes;
+- `rwoo-closing-quotes.timer` — append scanner quotes every 30 minutes;
+- `rwoo-closing-quotes-near.timer` — targeted venue quotes every five minutes
+  during the final trading hour;
 - `rwoo-evidence.timer` — evidence and resolution cycle every six hours.
 
 Public traffic is HTTPS-only. Application ports are not exposed publicly.

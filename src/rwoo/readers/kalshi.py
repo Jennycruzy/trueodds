@@ -94,6 +94,32 @@ def fetch_markets(
             client.close()
 
 
+def fetch_market(market_id: str, client: httpx.Client | None = None) -> dict:
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        data = _get_json(client, f"{BASE_URL}/markets/{market_id}")
+        return data.get("market", data)
+    finally:
+        if own_client:
+            client.close()
+
+
+def fetch_orderbook(market_id: str, *, depth: int = 1,
+                    client: httpx.Client | None = None) -> dict:
+    own_client = client is None
+    client = client or httpx.Client(timeout=15)
+    try:
+        data = _get_json(
+            client, f"{BASE_URL}/markets/{market_id}/orderbook",
+            {"depth": max(1, min(depth, 100))},
+        )
+        return data.get("orderbook_fp") or data.get("orderbook") or {}
+    finally:
+        if own_client:
+            client.close()
+
+
 def fetch_active_markets(
     *,
     max_markets: int = 500,
@@ -200,6 +226,10 @@ def market_row_to_canonical(market: dict) -> CanonicalMarket:
         market_status=market.get("status"),
         raw={"market": market, "series_ticker": series_ticker},
     )
+
+
+def fetch_canonical_market(market_id: str, client: httpx.Client | None = None) -> CanonicalMarket:
+    return market_row_to_canonical(fetch_market(market_id, client=client))
 
 
 def fetch_markets_for_event(event_ticker: str, client: httpx.Client | None = None) -> list[CanonicalMarket]:

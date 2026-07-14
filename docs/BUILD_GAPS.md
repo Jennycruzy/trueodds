@@ -37,7 +37,10 @@ The release gate remains unchanged: funded execution is disabled until the
 exact deployed version beats both naive and closing-market baselines after
 costs on independent prospective outcomes. Closing-price capture and
 prospective resolutions take priority over adding more model families. The
-complete candidate suite passes **186 tests**.
+closing-quote watcher candidate adds 30-minute scanner snapshots, targeted
+five-minute final-hour venue snapshots, an 80% independent-group coverage gate,
+and strict rejection of unproven post-close prices. The complete candidate
+suite passes **196 tests**.
 
 ## 2026-07-13 current listing readiness (authoritative)
 

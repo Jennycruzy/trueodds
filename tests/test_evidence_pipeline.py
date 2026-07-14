@@ -170,7 +170,53 @@ class EvidencePipelineTests(unittest.TestCase):
             store.resolve_pending(FakeClient({"status": "finalized", "result": "yes"}))
             resolution = next(r.payload for r in store._records("forecast_resolution"))
             self.assertEqual(resolution["closing_market_implied_prob"], .40)
-            self.assertEqual(resolution["closing_price_source"], "latest pre-resolution scanner quote")
+            self.assertEqual(resolution["closing_price_source"], "six-hour evidence scan")
+
+    def test_resolution_time_quote_is_never_used_as_unproven_close(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.jsonl")
+            store.collect_scan({"top": [priced_record(
+                fetched_at="2026-07-10T20:00:00+00:00", implied_prob=.99,
+                trading_close_time="2026-07-10T18:00:00+00:00",
+                resolution_time="2026-07-10T18:00:00+00:00",
+            )]})
+            store.resolve_pending(FakeClient({
+                "status": "finalized", "result": "yes", "yes_bid": .90, "yes_ask": .92,
+            }))
+            resolution = next(r.payload for r in store._records("forecast_resolution"))
+            self.assertIsNone(resolution["closing_market_implied_prob"])
+            self.assertIsNone(resolution["closing_price_source"])
+
+    def test_one_market_closing_quote_benchmarks_each_daily_precommit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.jsonl")
+            store.collect_scan({"top": [priced_record(
+                fetched_at="2026-07-09T10:00:00+00:00", implied_prob=.35,
+                resolution_time="2026-07-11T18:00:00+00:00",
+            )]})
+            store.collect_scan({"top": [priced_record(
+                fetched_at="2026-07-10T10:00:00+00:00", implied_prob=.45,
+                resolution_time="2026-07-11T18:00:00+00:00",
+            )]})
+            store.ledger.append("market_quote_snapshot", {
+                "quote_key": "closing", "venue": "kalshi", "market_id": "KXTEST-1",
+                "observed_at": "2026-07-11T17:59:00+00:00", "market_implied_prob": .66,
+                "trading_close_time": "2026-07-11T18:00:00+00:00",
+                "quote_source": "targeted final-hour venue quote",
+            })
+            result = store.resolve_pending(FakeClient({"status": "finalized", "result": "yes"}))
+            self.assertEqual(result["resolved"], 2)
+            resolutions = [r.payload for r in store._records("forecast_resolution")]
+            self.assertEqual([r["closing_market_implied_prob"] for r in resolutions], [.66, .66])
+
+    def test_promotion_requires_closing_price_coverage_and_outperformance(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            store = EvidenceStore(Path(tmp) / "evidence.jsonl")
+            store.collect_scan({"top": [priced_record()]})
+            store.resolve_pending(FakeClient({"status": "finalized", "result": "yes"}))
+            criteria = store.report()["promotion_readiness"]["weather.temperature"]["criteria"]
+            self.assertIn("closing_price_group_coverage_at_least_0_80", criteria)
+            self.assertIn("beats_closing_market_brier", criteria)
 
 
 if __name__ == "__main__":

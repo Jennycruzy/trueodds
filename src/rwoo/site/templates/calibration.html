@@ -114,7 +114,8 @@ forecasts are kept. Confidence is earned only through independent, resolved even
   <table>
     <thead><tr>
       <th scope="col">Family</th><th scope="col" class="num">Independent events</th>
-      <th scope="col" class="num">Next checkpoint</th><th scope="col">Concordance</th><th scope="col">Eligible</th>
+      <th scope="col" class="num">Next checkpoint</th><th scope="col">Concordance</th>
+      <th scope="col">Closing coverage</th><th scope="col">Eligible</th>
     </tr></thead>
     <tbody>
     {% for family, row in report.promotion_readiness.items() %}
@@ -123,6 +124,7 @@ forecasts are kept. Confidence is earned only through independent, resolved even
         <td class="num">{{ row.independent_event_groups }}</td>
         <td class="num">{{ row.next_checkpoint if row.next_checkpoint is not none else "—" }}</td>
         <td>{% if row.official_source_concordance_rate is not none %}{{ (row.official_source_concordance_rate*100)|round(0) }}% ({{ row.official_source_checks }} checks){% else %}<span class="muted small">no checks yet</span>{% endif %}</td>
+        <td>{% if row.market_and_paper_performance %}{{ (row.market_and_paper_performance.closing_price_group_coverage*100)|round(0) }}% ({{ row.market_and_paper_performance.closing_price_event_groups }} groups){% else %}<span class="muted small">no closes yet</span>{% endif %}</td>
         <td>{% if row.eligible %}<span class="badge good"><span class="ic" aria-hidden="true"></span>eligible</span>{% else %}<span class="badge off"><span class="ic" aria-hidden="true"></span>accumulating</span>{% endif %}</td>
       </tr>
     {% endfor %}

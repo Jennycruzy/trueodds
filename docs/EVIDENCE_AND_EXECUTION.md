@@ -19,13 +19,19 @@ it, how the number was produced, and how forecasts performed after resolution.
 2. Every priced record is appended to `data/receipts/forecast_evidence.jsonl`.
 3. The record commits the event group, rule hash, authority, model version,
    probability interval, confidence, executable EV, and why trace.
-4. Same-market/same-model snapshots are deduplicated within a UTC day.
-5. A six-hour systemd timer checks unresolved records.
-6. Kalshi finalized results, Polymarket closed outcomes, and Limitless resolved
+4. Same-market/same-model forecast snapshots are deduplicated within a UTC day.
+5. A 30-minute collector commits quotes from the fresh scanner artifact; a
+   separate five-minute collector refreshes only markets within their final
+   trading hour directly from the venue.
+6. Each quote records bid, ask, midpoint, spread, last trade when available,
+   depth or an explicit unavailable marker, capture time, cutoff, and a
+   cryptographic hash of the normalized or venue response.
+7. A six-hour systemd timer checks unresolved records.
+8. Kalshi finalized results, Polymarket closed outcomes, and Limitless resolved
    outcomes are appended without altering the original forecast.
-7. Supported US high/low weather results are checked directly against NOAA
+9. Supported US high/low weather results are checked directly against NOAA
    NCEI Daily Summaries for the registered station and date.
-8. Calibration reports are written atomically under `data/public/`.
+10. Calibration reports are written atomically under `data/public/`.
 
 Legacy venue rows created before venue-specific resolution IDs existed remain
 in the immutable ledger but are labeled unsupported for automatic resolution.
@@ -50,6 +56,8 @@ weather gate currently requires:
 | Brier score | at most 0.20 |
 | Maximum calibration gap | at most 0.15 |
 | Venue/NOAA concordance | at least 95% |
+| Independent-event closing-price coverage | at least 80% |
+| Closing-market Brier comparison | oracle must win |
 
 Passing numbers is necessary but insufficient. Review also covers source
 failures, parser/entity safety, confidence bands, executable costs, forecast
@@ -69,8 +77,11 @@ Paper performance selects at most one recommendation per independent event
 (the highest precommitted expected profit) and settles one contract at the
 recorded executable entry price after the recorded fee. This prevents a large
 threshold ladder from inflating the apparent number of independent bets.
-Closing-price comparison is reported only when a venue returns a genuine final
-quote; resolved 0/1 settlement prices are never mislabeled as closing forecasts.
+Closing-price comparison uses the latest valid quote at or before the trading
+or resolution cutoff. A final quote for one venue contract benchmarks every
+daily forecast precommit for that contract. Resolved 0/1 settlement prices are
+never mislabeled as closing forecasts. Fewer than 80% of independently resolved
+event groups with a closing quote keeps promotion locked.
 
 ## Execution policy
 
@@ -110,7 +121,7 @@ demonstrate the product; paid API calls remain the business model.
 ## Current production state
 
 - Evidence timer: enabled every six hours.
-- Release-candidate suite: 186 passing tests as of 2026-07-14.
+- Closing-quote timers: 30-minute general capture and five-minute final-hour capture.
 - Weather v2: 1,920 precommitted contract rows; 1,200 resolved rows across 160
   independent event groups; Brier 0.1246. This historical exact-version record
   does not promote v3.
