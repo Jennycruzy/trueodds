@@ -21,6 +21,7 @@ from rwoo.engines import economics, energy, hurricane, sports, weather
 from rwoo.parsers import parse_commodity_market, parse_economics_market, parse_sports_market, parse_weather_market
 from rwoo.explanations import build_why_trace
 from rwoo.cross_venue import find_cross_venue_edges
+from rwoo.edge_audit import audit_scan, write_audit
 from rwoo.identity import event_identity, model_version
 from rwoo.readers import kalshi, limitless, noaa_hurricane, polymarket
 from rwoo import economic_sources
@@ -741,6 +742,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     if args.write:
         write_scan_artifacts(scan)
+        write_audit(audit_scan(scan))
     if args.json:
         print(json.dumps(scan, indent=2, sort_keys=True))
     else:

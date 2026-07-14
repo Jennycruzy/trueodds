@@ -30,6 +30,9 @@ DEFAULT_REPORT = Path(os.environ.get(
 DEFAULT_REPORT_MD = Path(os.environ.get(
     "RWOO_CALIBRATION_REPORT_MD_PATH", str(DEFAULT_REPORT.with_suffix(".md")),
 ))
+DEFAULT_BACKLOG = Path(os.environ.get(
+    "RWOO_EVIDENCE_BACKLOG_PATH", str(DEFAULT_REPORT.with_name("evidence_backlog_latest.json")),
+))
 KALSHI_MARKET_URL = "https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets/{market_id}"
 LIMITLESS_URL = "https://api.limitless.exchange/markets/{market_id}"
@@ -42,6 +45,14 @@ MIN_CLOSING_PRICE_GROUP_COVERAGE = 0.80
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _datetime_or_none(value: Any) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return parsed.replace(tzinfo=timezone.utc) if parsed.tzinfo is None else parsed.astimezone(timezone.utc)
+    except (TypeError, ValueError):
+        return None
 
 
 def _day(timestamp: str) -> str:
@@ -236,6 +247,214 @@ class EvidenceStore:
     def _records(self, record_type: str | None = None):
         rows = self.ledger.read_records()
         return [row for row in rows if record_type is None or row.record_type == record_type]
+
+    def backlog(
+        self,
+        *,
+        family: str | None = None,
+        model_version: str | None = None,
+        now: datetime | None = None,
+        latest_report: dict[str, Any] | None = None,
+        max_report_age_hours: float = 7.0,
+    ) -> dict[str, Any]:
+        """Summarize evidence progress without polling venues or writing records.
+
+        This is deliberately separate from ``report``: operators can diagnose a
+        resolution backlog without refreshing artifacts, touching the model, or
+        changing anything served by the public API.
+        """
+        now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+        records = self._records()
+
+        def selected(payload: dict[str, Any]) -> bool:
+            return (
+                (family is None or payload.get("family") == family)
+                and (model_version is None or payload.get("model_version") == model_version)
+            )
+
+        precommits = {
+            row.payload["snapshot_key"]: row.payload
+            for row in records
+            if row.record_type == "forecast_precommit"
+            and row.payload.get("snapshot_key")
+            and selected(row.payload)
+        }
+        resolutions = {
+            row.payload["snapshot_key"]: row.payload
+            for row in records
+            if row.record_type == "forecast_resolution"
+            and row.payload.get("snapshot_key") in precommits
+        }
+        verified = {
+            row.payload["snapshot_key"]: row.payload
+            for row in records
+            if row.record_type == "official_source_verification"
+            and row.payload.get("snapshot_key") in precommits
+            and row.payload.get("status") == "resolved"
+        }
+        selected_snapshot_keys = set(precommits)
+        selected_market_keys = {
+            (
+                str(payload.get("venue") or ""),
+                str(payload.get("market_id") or ""),
+                str(payload.get("model_version") or ""),
+            )
+            for payload in precommits.values()
+        }
+        quotes = [
+            row.payload for row in records
+            if row.record_type == "market_quote_snapshot"
+            and (
+                row.payload.get("forecast_snapshot_key") in selected_snapshot_keys
+                or (
+                    str(row.payload.get("venue") or ""),
+                    str(row.payload.get("market_id") or ""),
+                    str(row.payload.get("model_version") or model_version or ""),
+                ) in selected_market_keys
+                or (
+                    not row.payload.get("model_version")
+                    and any(
+                        venue == str(row.payload.get("venue") or "")
+                        and market_id == str(row.payload.get("market_id") or "")
+                        for venue, market_id, _version in selected_market_keys
+                    )
+                )
+            )
+        ]
+        quotes_by_snapshot: dict[str, list[dict[str, Any]]] = {}
+        quotes_by_market: dict[tuple[str, str], list[dict[str, Any]]] = {}
+        for quote in quotes:
+            snapshot_key = quote.get("forecast_snapshot_key")
+            if snapshot_key:
+                quotes_by_snapshot.setdefault(str(snapshot_key), []).append(quote)
+            market_key = (str(quote.get("venue") or ""), str(quote.get("market_id") or ""))
+            quotes_by_market.setdefault(market_key, []).append(quote)
+
+        unresolved = [payload for key, payload in precommits.items() if key not in resolutions]
+        due = [payload for payload in unresolved if _resolution_due(payload, now)]
+        future = [payload for payload in unresolved if not _resolution_due(payload, now)]
+        resolved_payloads = list(resolutions.values())
+        waiting_official = [
+            precommits[key] for key in resolutions
+            if precommits[key].get("domain") == "weather" and key not in verified
+        ]
+        verified_payloads = [precommits[key] for key in verified]
+
+        report_created_at = _datetime_or_none((latest_report or {}).get("created_at"))
+        report_age_hours = (
+            (now - report_created_at).total_seconds() / 3600 if report_created_at else None
+        )
+        due_at_last_report = [
+            payload for payload in due
+            if report_created_at is not None
+            and (_datetime_or_none(payload.get("resolution_time")) or datetime.min.replace(tzinfo=timezone.utc))
+            <= report_created_at
+        ]
+
+        quote_keys: set[str] = set()
+        targeted_keys: set[str] = set()
+        for key, forecast in precommits.items():
+            matching = [
+                quote for quote in (
+                    quotes_by_snapshot.get(key, [])
+                    + quotes_by_market.get((str(forecast.get("venue") or ""), str(forecast.get("market_id") or "")), [])
+                )
+                if (
+                    quote.get("forecast_snapshot_key") == key
+                    or (
+                        quote.get("venue") == forecast.get("venue")
+                        and quote.get("market_id") == forecast.get("market_id")
+                    )
+                )
+                and _quote_before_cutoff(quote, forecast)
+            ]
+            if matching:
+                quote_keys.add(key)
+            if any(
+                quote.get("capture_mode") == "near-close"
+                or quote.get("quote_source") == "targeted final-hour venue quote"
+                for quote in matching
+            ):
+                targeted_keys.add(key)
+
+        closing_keys = {
+            key for key, payload in resolutions.items()
+            if _float_or_none(payload.get("closing_market_implied_prob")) is not None
+        }
+
+        def summary(payloads: list[dict[str, Any]]) -> dict[str, int]:
+            return {
+                "contract_rows": len(payloads),
+                "independent_event_groups": len({
+                    str(payload.get("event_group_id")) for payload in payloads
+                    if payload.get("event_group_id")
+                }),
+            }
+
+        def oldest(payloads: list[dict[str, Any]]) -> dict[str, Any] | None:
+            dated = [
+                (timestamp, payload)
+                for payload in payloads
+                if (timestamp := _datetime_or_none(payload.get("forecast_created_at"))) is not None
+            ]
+            if not dated:
+                return None
+            timestamp, payload = min(dated, key=lambda item: item[0])
+            return {
+                "snapshot_key": payload.get("snapshot_key"),
+                "event_group_id": payload.get("event_group_id"),
+                "venue": payload.get("venue"),
+                "market_id": payload.get("market_id"),
+                "forecast_created_at": timestamp.isoformat(),
+                "resolution_time": payload.get("resolution_time"),
+            }
+
+        warnings = []
+        if report_created_at is None:
+            warnings.append("latest calibration report is unavailable or lacks a valid created_at timestamp")
+        elif report_age_hours is not None and report_age_hours > max_report_age_hours:
+            warnings.append(
+                f"latest calibration report is stale ({report_age_hours:.1f}h > {max_report_age_hours:.1f}h)"
+            )
+        if due_at_last_report:
+            warnings.append(
+                f"{len(due_at_last_report)} due forecast(s) remained unresolved after the latest evidence report"
+            )
+        if waiting_official:
+            warnings.append(
+                f"{len(waiting_official)} resolved weather forecast(s) still await official-source verification"
+            )
+
+        latest_ledger_write = max(
+            (_datetime_or_none(row.created_at) for row in records), default=None,
+            key=lambda value: value or datetime.min.replace(tzinfo=timezone.utc),
+        )
+        return {
+            "generated_at": now.isoformat(),
+            "status": "attention" if warnings else "ok",
+            "filters": {"family": family, "model_version": model_version},
+            "precommitted": summary(list(precommits.values())),
+            "waiting_for_resolution_time": summary(future),
+            "eligible_to_resolve": summary(due),
+            "eligible_at_last_evidence_run": summary(due_at_last_report),
+            "venue_resolved": summary(resolved_payloads),
+            "waiting_for_official_source": summary(waiting_official),
+            "officially_verified": summary(verified_payloads),
+            "quote_coverage": {
+                "pre_cutoff_quote_contracts": len(quote_keys),
+                "pre_cutoff_quote_rate": len(quote_keys) / len(precommits) if precommits else 0.0,
+                "targeted_final_hour_contracts": len(targeted_keys),
+                "resolved_with_closing_quote_contracts": len(closing_keys),
+                "resolved_with_closing_quote_rate": len(closing_keys) / len(resolutions) if resolutions else 0.0,
+            },
+            "oldest_unresolved_forecast": oldest(unresolved),
+            "oldest_eligible_forecast": oldest(due),
+            "last_successful_evidence_report": report_created_at.isoformat() if report_created_at else None,
+            "report_age_hours": report_age_hours,
+            "latest_ledger_write": latest_ledger_write.isoformat() if latest_ledger_write else None,
+            "warnings": warnings,
+            "ledger_verification": self.ledger.verify(),
+        }
 
     def collect_scan(self, scan: dict[str, Any]) -> dict[str, Any]:
         existing = {
@@ -801,6 +1020,14 @@ def write_report(report: dict[str, Any], json_path: str | Path = DEFAULT_REPORT,
     md_tmp.replace(md_path)
 
 
+def write_backlog(backlog: dict[str, Any], path: str | Path = DEFAULT_BACKLOG) -> None:
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    temporary.write_text(json.dumps(backlog, indent=2, sort_keys=True), encoding="utf-8")
+    temporary.replace(path)
+
+
 def run_daily(store: EvidenceStore) -> dict[str, Any]:
     scan = scan_opportunities()
     collected = store.collect_scan(scan)
@@ -808,17 +1035,41 @@ def run_daily(store: EvidenceStore) -> dict[str, Any]:
     verified = store.verify_official_sources()
     report = store.report()
     write_report(report)
+    backlog = store.backlog(
+        family="weather.temperature",
+        model_version=WEATHER_PRODUCTION_MODEL,
+        latest_report=report,
+    )
+    write_backlog(backlog)
     return {"collected": collected, "resolved": resolved, "official_verification": verified,
-            "report": report}
+            "report": report, "backlog": backlog}
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Precommit, resolve, and score oracle evidence")
-    parser.add_argument("action", choices=("collect", "resolve", "report", "run"), default="run", nargs="?")
+    parser.add_argument("action", choices=("backlog", "collect", "resolve", "report", "run"), default="run", nargs="?")
     parser.add_argument("--ledger", default=str(DEFAULT_LEDGER))
+    parser.add_argument("--family", default="weather.temperature")
+    parser.add_argument("--model-version", default=WEATHER_PRODUCTION_MODEL)
+    parser.add_argument("--latest-report", default=str(DEFAULT_REPORT))
+    parser.add_argument("--max-report-age-hours", type=float, default=7.0)
+    parser.add_argument("--output", help="optional path for the derived backlog JSON artifact")
     args = parser.parse_args(argv)
     store = EvidenceStore(args.ledger)
-    if args.action == "collect":
+    if args.action == "backlog":
+        try:
+            latest_report = json.loads(Path(args.latest_report).read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            latest_report = None
+        result = store.backlog(
+            family=args.family or None,
+            model_version=args.model_version or None,
+            latest_report=latest_report,
+            max_report_age_hours=args.max_report_age_hours,
+        )
+        if args.output:
+            write_backlog(result, args.output)
+    elif args.action == "collect":
         result = store.collect_scan(scan_opportunities())
     elif args.action == "resolve":
         result = store.resolve_pending()

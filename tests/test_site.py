@@ -20,17 +20,24 @@ ROUTES = ["/", "/docs", "/playground", "/calibration", "/markets", "/receipts",
           "/robots.txt", "/sitemap.xml", "/favicon.svg", "/healthz"]
 
 
-def settings_for(tmp: str, *, scan=None, report=None, **overrides) -> Settings:
+def settings_for(tmp: str, *, scan=None, report=None, backlog=None, edge_audit=None, **overrides) -> Settings:
     d = Path(tmp)
     scan_path = d / "opportunity_scan_latest.json"
     report_path = d / "calibration_report_latest.json"
+    backlog_path = d / "evidence_backlog_latest.json"
+    edge_audit_path = d / "opportunity_scan_edge_audit_latest.json"
     if scan is not None:
         scan_path.write_text(json.dumps(scan), encoding="utf-8")
     if report is not None:
         report_path.write_text(json.dumps(report), encoding="utf-8")
+    if backlog is not None:
+        backlog_path.write_text(json.dumps(backlog), encoding="utf-8")
+    if edge_audit is not None:
+        edge_audit_path.write_text(json.dumps(edge_audit), encoding="utf-8")
     base = dict(
         api_base_url="http://api.testserver", public_base_url="http://testserver",
         opportunity_scan_path=scan_path, calibration_report_path=report_path,
+        evidence_backlog_path=backlog_path, edge_audit_path=edge_audit_path,
         decision_ledger_path=d / "decisions.jsonl",
     )
     base.update(overrides)
@@ -81,6 +88,36 @@ def a_report():
         }},
         "ledger_verification": {"valid": True, "record_count": 24},
         "selection_policy": "all priced records precommitted; losses retained",
+    }
+
+
+def a_backlog():
+    return {
+        "status": "ok",
+        "filters": {
+            "family": "weather.temperature",
+            "model_version": "weather-ensemble-v3-power-calibrated",
+        },
+        "precommitted": {"contract_rows": 1368, "independent_event_groups": 120},
+        "waiting_for_resolution_time": {"contract_rows": 1368, "independent_event_groups": 120},
+        "eligible_to_resolve": {"contract_rows": 0, "independent_event_groups": 0},
+        "venue_resolved": {"contract_rows": 0, "independent_event_groups": 0},
+        "waiting_for_official_source": {"contract_rows": 0, "independent_event_groups": 0},
+        "officially_verified": {"contract_rows": 0, "independent_event_groups": 0},
+        "quote_coverage": {"pre_cutoff_quote_rate": 1.0},
+        "last_successful_evidence_report": "2026-07-14T04:44:20+00:00",
+        "oldest_unresolved_forecast": {"resolution_time": "2026-07-20T14:00:00Z"},
+        "warnings": [],
+    }
+
+
+def an_edge_audit():
+    return {
+        "status": "pass",
+        "scan_created_at": "2026-07-14T09:59:32+00:00",
+        "audited_rows": 30,
+        "structural_failures": 0,
+        "scope": "structural consistency only",
     }
 
 
@@ -192,6 +229,26 @@ class LiveDataTests(unittest.TestCase):
         for r in ["/", "/calibration", "/markets", "/status"]:
             html = c.get(r).text
             self.assertEqual(len(re.findall(r">\s*None\s*<", html)), 0, r)
+
+    def test_status_renders_precomputed_operational_diagnostics(self):
+        c = client(settings_for(
+            self.tmp, scan=a_scan(), report=a_report(),
+            backlog=a_backlog(), edge_audit=an_edge_audit(),
+        ))
+        html = c.get("/status").text
+        self.assertIn("Exact-model evidence progress", html)
+        self.assertIn("1368", html)
+        self.assertIn("120", html)
+        self.assertIn("Waiting for resolution time", html)
+        self.assertIn("No overdue exact-model resolution backlog", html)
+        self.assertIn("Large-edge structural audit", html)
+        self.assertIn("Largest edges audited", html)
+        self.assertIn("structural consistency only", html)
+
+    def test_status_diagnostics_have_honest_empty_states(self):
+        html = client(settings_for(self.tmp, scan=a_scan(), report=a_report())).get("/status").text
+        self.assertIn("backlog diagnostic has not been generated", html)
+        self.assertIn("structural audit has not been generated", html)
 
 
 class LegalPagesTests(unittest.TestCase):

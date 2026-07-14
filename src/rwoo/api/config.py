@@ -37,6 +37,11 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
+def _sibling_artifact(env_name: str, sibling_env: str, sibling_default: str, filename: str) -> Path:
+    sibling = Path(_env(sibling_env, sibling_default))
+    return Path(_env(env_name, str(sibling.with_name(filename))))
+
+
 @dataclass(frozen=True)
 class Settings:
     # Canonical public URLs — generated, never hardcoded elsewhere.
@@ -57,6 +62,14 @@ class Settings:
     # Artifact + ledger paths (repo-relative defaults).
     opportunity_scan_path: Path = field(default_factory=lambda: Path(_env("RWOO_OPPORTUNITY_SCAN_PATH", "data/public/opportunity_scan_latest.json")))
     calibration_report_path: Path = field(default_factory=lambda: Path(_env("RWOO_CALIBRATION_REPORT_PATH", "data/public/calibration_report_latest.json")))
+    evidence_backlog_path: Path = field(default_factory=lambda: _sibling_artifact(
+        "RWOO_EVIDENCE_BACKLOG_PATH", "RWOO_CALIBRATION_REPORT_PATH",
+        "data/public/calibration_report_latest.json", "evidence_backlog_latest.json",
+    ))
+    edge_audit_path: Path = field(default_factory=lambda: _sibling_artifact(
+        "RWOO_EDGE_AUDIT_PATH", "RWOO_OPPORTUNITY_SCAN_PATH",
+        "data/public/opportunity_scan_latest.json", "opportunity_scan_edge_audit_latest.json",
+    ))
     evidence_ledger_path: Path = field(default_factory=lambda: Path(_env("RWOO_EVIDENCE_LEDGER_PATH", "data/receipts/forecast_evidence.jsonl")))
     decision_ledger_path: Path = field(default_factory=lambda: Path(_env("RWOO_DECISION_LEDGER_PATH", "data/receipts/decision_receipts.jsonl")))
 

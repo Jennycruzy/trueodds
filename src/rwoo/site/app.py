@@ -64,6 +64,14 @@ def _calibration(settings: Settings) -> dict[str, Any] | None:
     return services.load_json_artifact(settings.calibration_report_path)
 
 
+def _evidence_backlog(settings: Settings) -> dict[str, Any] | None:
+    return services.load_json_artifact(settings.evidence_backlog_path)
+
+
+def _edge_audit(settings: Settings) -> dict[str, Any] | None:
+    return services.load_json_artifact(settings.edge_audit_path)
+
+
 def _live_example(scan: dict[str, Any] | None) -> dict[str, Any] | None:
     """Pick one real, priced scan record for the landing hero — preferring an
     actionable, higher-confidence record. Never fabricated; None if the scan
@@ -203,7 +211,13 @@ def create_site(settings: Settings | None = None) -> FastAPI:
     async def status(request: Request):
         evidence = _evidence_summary(settings)
         scan = _scan(settings)
-        return render(request, "status.html", "/status", evidence=evidence, scan=scan)
+        return render(
+            request, "status.html", "/status",
+            evidence=evidence,
+            evidence_backlog=_evidence_backlog(settings),
+            edge_audit=_edge_audit(settings),
+            scan=scan,
+        )
 
     @app.get("/privacy", response_class=HTMLResponse)
     async def privacy(request: Request):

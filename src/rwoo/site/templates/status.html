@@ -33,6 +33,71 @@ authoritative liveness/readiness signals; this page summarizes evidence and scan
   {% endif %}
 </dl>
 
+<h2>Exact-model evidence progress</h2>
+{% if evidence_backlog %}
+<p>The live production model is tracked separately from retrospective development evidence. Forecasts waiting for
+their declared resolution time are scheduled work, not failed resolutions.</p>
+<div class="tiles">
+  <div class="tile">
+    <div class="value tnum">{{ evidence_backlog.precommitted.contract_rows }}</div>
+    <div class="label">Exact-model precommits</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ evidence_backlog.precommitted.independent_event_groups }}</div>
+    <div class="label">Independent event groups</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ evidence_backlog.waiting_for_resolution_time.contract_rows }}</div>
+    <div class="label">Waiting for resolution time</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ evidence_backlog.eligible_to_resolve.contract_rows }}</div>
+    <div class="label">Eligible to resolve now</div>
+  </div>
+</div>
+<dl class="kv">
+  <dt>Model version</dt><dd><code>{{ evidence_backlog.filters.model_version }}</code></dd>
+  <dt>Venue-resolved contracts</dt><dd>{{ evidence_backlog.venue_resolved.contract_rows }}</dd>
+  <dt>Awaiting official-source verification</dt><dd>{{ evidence_backlog.waiting_for_official_source.contract_rows }}</dd>
+  <dt>Officially verified contracts</dt><dd>{{ evidence_backlog.officially_verified.contract_rows }}</dd>
+  <dt>Pre-cutoff quote coverage</dt><dd>{{ "%.1f%%"|format(evidence_backlog.quote_coverage.pre_cutoff_quote_rate * 100) }}</dd>
+  <dt>Last evidence report</dt><dd>{{ evidence_backlog.last_successful_evidence_report or "not available" }}</dd>
+  {% if evidence_backlog.oldest_unresolved_forecast %}
+  <dt>Next tracked resolution boundary</dt><dd>{{ evidence_backlog.oldest_unresolved_forecast.resolution_time or "not declared" }}</dd>
+  {% endif %}
+</dl>
+{% if evidence_backlog.warnings %}
+<div class="note empty"><p>{{ evidence_backlog.warnings|join(" ") }}</p></div>
+{% else %}
+<div class="note law"><p>No overdue exact-model resolution backlog was detected in the latest diagnostic.</p></div>
+{% endif %}
+{% else %}
+<div class="note empty"><p>The exact-model backlog diagnostic has not been generated yet.</p></div>
+{% endif %}
+
+<h2>Large-edge structural audit</h2>
+{% if edge_audit %}
+<p>This read-only check verifies the internal arithmetic and bindings behind the largest current signals. It does
+not claim that a forecast will win or that displayed liquidity guarantees a fill.</p>
+<div class="tiles">
+  <div class="tile">
+    <div class="value">{% if edge_audit.status == "pass" %}Pass{% else %}Attention{% endif %}</div>
+    <div class="label">Structural consistency</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ edge_audit.audited_rows }}</div>
+    <div class="label">Largest edges audited</div>
+  </div>
+  <div class="tile">
+    <div class="value tnum">{{ edge_audit.structural_failures }}</div>
+    <div class="label">Structural failures</div>
+  </div>
+</div>
+<p class="small muted">Audit source scan: {{ edge_audit.scan_created_at }}. Scope: {{ edge_audit.scope }}</p>
+{% else %}
+<div class="note empty"><p>The large-edge structural audit has not been generated yet.</p></div>
+{% endif %}
+
 <h2>Latest opportunity scan</h2>
 {% if scan %}
 <dl class="kv">

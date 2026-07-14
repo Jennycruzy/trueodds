@@ -27,17 +27,25 @@ class RuntimePathTests(unittest.TestCase):
             "RWOO_OPPORTUNITY_SCAN_MD_PATH": "/var/lib/rwoo/public/scan.md",
         })
         evidence = self._probe(
-            "rwoo.evidence", ["DEFAULT_LEDGER", "DEFAULT_REPORT", "DEFAULT_REPORT_MD"], {
+            "rwoo.evidence", ["DEFAULT_LEDGER", "DEFAULT_REPORT", "DEFAULT_REPORT_MD", "DEFAULT_BACKLOG"], {
                 "RWOO_EVIDENCE_LEDGER_PATH": "/var/lib/rwoo/receipts/evidence.jsonl",
                 "RWOO_CALIBRATION_REPORT_PATH": "/var/lib/rwoo/public/calibration.json",
                 "RWOO_CALIBRATION_REPORT_MD_PATH": "/var/lib/rwoo/public/calibration.md",
             },
         )
+        edge_audit = self._probe("rwoo.edge_audit", ["DEFAULT_SCAN", "DEFAULT_AUDIT"], {
+            "RWOO_OPPORTUNITY_SCAN_PATH": "/var/lib/rwoo/public/scan.json",
+        })
         self.assertEqual(scan, ["/var/lib/rwoo/public/scan.json", "/var/lib/rwoo/public/scan.md"])
         self.assertEqual(evidence, [
             "/var/lib/rwoo/receipts/evidence.jsonl",
             "/var/lib/rwoo/public/calibration.json",
             "/var/lib/rwoo/public/calibration.md",
+            "/var/lib/rwoo/public/evidence_backlog_latest.json",
+        ])
+        self.assertEqual(edge_audit, [
+            "/var/lib/rwoo/public/scan.json",
+            "/var/lib/rwoo/public/opportunity_scan_edge_audit_latest.json",
         ])
 
     def test_worker_units_load_shared_environment_and_state(self):
