@@ -15,7 +15,7 @@ honor the configured artifact paths. Migration selects the exact-prefix longer
 forecast ledger (14,252 records) and decision ledger (8 records), preserving
 all append-only history without rewriting records. Regression coverage verifies
 the environment-bound paths and hardened systemd write boundaries. The full
-candidate suite passes **206 tests**.
+candidate suite passes **207 tests**.
 
 The same audit fixed two adjacent release-readiness issues. API and site
 sandboxes now explicitly allow the shared ledger directory, so receipt-backed

@@ -70,10 +70,11 @@ def _calibration_context(report: dict[str, Any] | None, family: str, oracle_prob
         }
     promotion = (report.get("promotion_readiness") or {}).get(family)
     if not promotion:
+        exact = (((report.get("model_evidence") or {}).get(family) or {}).get(model_ver) or {})
         return {
             "status": "accumulating",
             "scope": scope,
-            "independent_resolved_events": int(report.get("independent_resolved_event_groups") or 0),
+            "independent_resolved_events": int(exact.get("independent_event_groups") or 0),
             "next_checkpoint": 30,
             "promotion_eligible": False,
             "criteria": {},

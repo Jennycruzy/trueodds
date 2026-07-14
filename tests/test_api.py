@@ -8,6 +8,7 @@ discipline the existing parser tests follow.
 """
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -97,6 +98,23 @@ class CheckMarketTests(unittest.TestCase):
         self.assertTrue(body["market_comparison"]["actionable"])
         self.assertEqual(body["market_comparison"]["side"], "YES")
         self.assertEqual(body["calibration"]["scope"]["probability_band"], "0.7-0.8")
+
+    def test_calibration_context_never_borrows_global_event_count(self):
+        report_path = Path(self.tmp) / "calibration_report.json"
+        report_path.write_text(json.dumps({
+            "independent_resolved_event_groups": 186,
+            "model_evidence": {"weather.temperature": {"weather-ensemble-v2": {
+                "independent_event_groups": 0,
+            }}},
+            "promotion_readiness": {},
+        }), encoding="utf-8")
+        settings = make_settings(self.tmp, calibration_report_path=report_path)
+        client, _ = client_for(self.tmp, settings=settings)
+        body = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "kalshi", "market_id": "KX-1"}},
+        ).json()
+        self.assertEqual(body["calibration"]["independent_resolved_events"], 0)
 
     def test_request_id_header_and_no_store(self):
         client, _ = client_for(self.tmp)
