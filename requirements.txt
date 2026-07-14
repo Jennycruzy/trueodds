@@ -3,3 +3,4 @@ pycryptodome>=3.20
 fastapi>=0.115
 uvicorn[standard]>=0.30
 jinja2>=3.1
+okxweb3-app-x402[evm]==0.1.1

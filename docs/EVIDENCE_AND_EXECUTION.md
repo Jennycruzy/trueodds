@@ -1,6 +1,6 @@
 # Evidence, Promotion, And Optional Execution
 
-Last updated: 2026-07-12
+Last updated: 2026-07-14
 
 ## Product boundary
 
@@ -110,7 +110,18 @@ demonstrate the product; paid API calls remain the business model.
 ## Current production state
 
 - Evidence timer: enabled every six hours.
-- Local and production suite: 94 passing tests as of 2026-07-10.
-- First report: 777 precommitted forecasts and zero resolved immediately after launch.
-- Weather next checkpoint: 30 independent resolved events.
+- Release-candidate suite: 186 passing tests as of 2026-07-14.
+- Weather v2: 1,920 precommitted contract rows; 1,200 resolved rows across 160
+  independent event groups; Brier 0.1246. This historical exact-version record
+  does not promote v3.
+- Weather v3: 888 prospective precommits and zero resolved independent groups.
+- V3 model-development validation: the fixed gamma-0.65 transform improves
+  retrospective Brier from 0.1246 to 0.1201, with walk-forward improvement
+  across 152 later test groups. It is published separately and counts as zero
+  prospective promotion events.
+- Weather v3 next checkpoint: 30 prospective independently resolved events.
 - Funded execution: disabled.
+- Henry Hub v2 rolling-year validation beats the naive baseline, but has zero
+  captured historical closing-market rows; it is therefore not promotion
+  eligible. Prospective resolution and pre-cutoff closing-price capture are the
+  next evidence priorities.

@@ -9,7 +9,7 @@ class CanonicalMarket:
     venue: str  # "kalshi" | "polymarket"
     market_id: str  # venue-native ticker / condition id
     question: str
-    domain: str  # "weather" | "economics" | "sports" | "other"
+    domain: str  # "weather" | "economics" | "sports" | "commodities" | "other"
     resolution_rule: str  # verbatim settlement rule text
     resolution_source: str  # named official source (e.g. "NWS Climatological Report")
     resolution_time: Optional[str]  # ISO8601 timestamp the market settles at/by
@@ -21,6 +21,11 @@ class CanonicalMarket:
     # title). Head-to-head engines bind their probability to THIS side instead
     # of guessing from title word order; None when the venue exposes no label.
     yes_subtitle: Optional[str] = None
+    # Distinct from resolution_time: this is the last instant at which the
+    # venue says an order can be accepted.  Ranking against settlement time
+    # caused near-close contracts to be advertised as tradable.
+    trading_close_time: Optional[str] = None
+    market_status: Optional[str] = None
     raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
     def describe(self) -> str:

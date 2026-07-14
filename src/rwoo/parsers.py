@@ -45,6 +45,8 @@ def parse_market(market) -> ParsedMarket | None:
         return parse_economics_market(market)
     if market.domain == "sports":
         return parse_sports_market(market)
+    if market.domain == "commodities":
+        return parse_commodity_market(market)
     return None
 
 
@@ -228,7 +230,9 @@ def _parse_tennis_match_market(market) -> ParsedMarket | None:
 
 def _parse_team_match_market(market) -> ParsedMarket | None:
     text = f"{market.question} {market.resolution_rule}".lower()
-    if any(x in text for x in ("mlb", "baseball", "world series")):
+    if any(x in text for x in ("nba", "basketball")):
+        family, label = "sports.nba", "NBA"
+    elif any(x in text for x in ("mlb", "baseball", "world series")):
         family, label = "sports.mlb", "MLB"
     elif any(x in text for x in ("premier league", "champions league", "la liga", "serie a", "bundesliga", "club soccer")):
         family, label = "sports.club_soccer", "club soccer"
@@ -249,6 +253,69 @@ def _parse_team_match_market(market) -> ParsedMarket | None:
                         reason=f"{label} head-to-head with fail-closed YES binding",
                         location=yes, source_series=b if yes == a else a,
                         settlement_source=market.resolution_source)
+
+
+def _kalshi_series(market) -> str:
+    raw = market.raw if isinstance(market.raw, dict) else {}
+    row = raw.get("market", {}) if isinstance(raw.get("market", {}), dict) else {}
+    return str(row.get("series_ticker") or raw.get("series_ticker") or row.get("event_ticker", "").split("-", 1)[0])
+
+
+def parse_commodity_market(market) -> ParsedMarket | None:
+    """Bind only verified commodity shapes; everything else remains visible.
+
+    Series metadata and structured strikes are authoritative. Text is used to
+    identify the commodity only after the venue has routed the market into the
+    commodities domain.
+    """
+    raw = market.raw if isinstance(market.raw, dict) else {}
+    row = raw.get("market", {}) if isinstance(raw.get("market", {}), dict) else {}
+    series = _kalshi_series(market).upper()
+    text = f"{market.question} {market.resolution_rule}".lower()
+    strike_type = row.get("strike_type")
+    floor = row.get("floor_strike")
+    cap = row.get("cap_strike")
+
+    if series == "KXNGASMAX" and "energy information administration" in text:
+        event_ticker = str(row.get("event_ticker") or "")
+        year_match = re.search(r"-(\d{2})(?:[A-Z]{3}\d{2})?(?:$|-)", event_ticker)
+        target_year = 2000 + int(year_match.group(1)) if year_match else None
+        return ParsedMarket(
+            domain="commodities", family="energy.henry_hub_spot", shape="annual_high",
+            status="engine_available" if strike_type == "greater" and floor is not None else "parse_missing",
+            reason="EIA-resolved Henry Hub annual-high contract with structured threshold",
+            target_date=market.trading_close_time or market.resolution_time,
+            target_year=target_year,
+            metric="usd_per_mmbtu", strike_type=strike_type,
+            floor_strike=float(floor) if floor is not None else None,
+            cap_strike=float(cap) if cap is not None else None,
+            settlement_source=market.resolution_source, source_series="DHHNGSP",
+            raw={"series_ticker": series},
+        )
+
+    agriculture = any(word in text for word in ("corn", "wheat", "soybean", "cattle", "coffee", "cocoa", "sugar"))
+    if agriculture:
+        return ParsedMarket(
+            domain="commodities", family="agriculture.commodity_price", shape="price_threshold_or_range",
+            status="source_missing",
+            reason="agricultural price contract recognized; approved live/history price feed is not configured",
+            target_date=market.trading_close_time or market.resolution_time,
+            strike_type=strike_type, floor_strike=float(floor) if floor is not None else None,
+            cap_strike=float(cap) if cap is not None else None, settlement_source=market.resolution_source,
+            source_series=series or None,
+        )
+
+    if any(word in text for word in ("wti", "brent", "crude oil", "natural gas", "gasoline", "heating oil")):
+        return ParsedMarket(
+            domain="commodities", family="energy.commodity_price", shape="price_threshold_or_range",
+            status="source_missing",
+            reason="energy price contract recognized; its exact ICE/Pyth/AAA source adapter is not configured",
+            target_date=market.trading_close_time or market.resolution_time,
+            strike_type=strike_type, floor_strike=float(floor) if floor is not None else None,
+            cap_strike=float(cap) if cap is not None else None, settlement_source=market.resolution_source,
+            source_series=series or None,
+        )
+    return None
 
 
 def parse_weather_market(market) -> ParsedMarket:
@@ -636,6 +703,31 @@ def _parse_kalshi_weather_market(market, raw_market: dict[str, Any]) -> ParsedMa
     series_ticker = raw_market.get("series_ticker") or event_ticker.split("-", 1)[0]
     if not series_ticker:
         return None
+
+    hurricane_counts = {
+        "KXTROPSTORM": "named_storms",
+        "KXHURCTOT": "hurricanes",
+        "KXHURCTOTMAJ": "major_hurricanes",
+    }
+    if series_ticker in hurricane_counts:
+        strike_type = raw_market.get("strike_type")
+        floor = _float_or_none(raw_market.get("floor_strike"))
+        ready = strike_type == "greater" and floor is not None
+        _month, target_year = _kalshi_event_month_year(event_ticker)
+        if target_year is None:
+            timestamp = market.trading_close_time or market.resolution_time or ""
+            year_match = re.match(r"^(20\d{2})", timestamp)
+            target_year = int(year_match.group(1)) if year_match else None
+        return ParsedMarket(
+            domain="weather", family="weather.hurricane_season", shape="atlantic_season_count",
+            status="engine_available" if ready else "parse_missing",
+            reason="NOAA-resolved Atlantic seasonal count contract with structured threshold",
+            metric=hurricane_counts[series_ticker], target_year=target_year,
+            target_date=market.trading_close_time or market.resolution_time,
+            strike_type=strike_type, floor_strike=floor,
+            settlement_source=market.resolution_source, source_series=series_ticker,
+            raw={"market": raw_market},
+        )
 
     metric = _kalshi_weather_metric(series_ticker)
     if metric is None:

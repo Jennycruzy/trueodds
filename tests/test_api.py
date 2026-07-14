@@ -12,13 +12,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from rwoo.api.app import create_app
 from rwoo.api.config import Settings
 from rwoo.api.errors import OracleError
 from rwoo.models import CanonicalMarket
 from rwoo.scanner import ScanRecord
+from tests.support import ASGITestClient
 
 
 def make_settings(tmp: str, **overrides) -> Settings:
@@ -76,7 +75,7 @@ def client_for(tmp, *, evaluate=None, fetch=None, settings=None):
     fetch = fetch or (lambda v, m: a_market(v, m))
     evaluate = evaluate or (lambda market: priced_record(market))
     app = create_app(settings, fetch_market=fetch, evaluate=evaluate)
-    return TestClient(app), settings
+    return ASGITestClient(app), settings
 
 
 class CheckMarketTests(unittest.TestCase):
@@ -252,8 +251,11 @@ class OpsAndCalibrationTests(unittest.TestCase):
         self.assertEqual(client.get("/version").json()["api_version"], "1.0.0")
         meta = client.get("/v1/service-metadata").json()
         self.assertFalse(meta["execution_enabled"])
-        self.assertEqual(len(meta["services"]), 3)
+        self.assertEqual(len(meta["services"]), 4)
         self.assertFalse(meta["payment"]["enabled"])  # disabled by default
+        best = next(svc for svc in meta["services"] if svc["identifier"] == "rwoo.best_signals")
+        self.assertEqual(best["command"], "rwoo_best_signals")
+        self.assertEqual(best["display_name"], "Best Signals")
         for svc in meta["services"]:
             self.assertIsNone(svc["price_atomic"])  # no price until operator approval
 
@@ -262,6 +264,15 @@ class OpsAndCalibrationTests(unittest.TestCase):
         data = client.get("/v1/supported-markets").json()
         self.assertEqual(set(data["venues"]), {"kalshi", "polymarket", "limitless"})
         self.assertIn("weather.temperature", data["families"])
+        self.assertIn("sports.world_cup", data["sports_families_currently_producing_candidates"])
+        coverage = {row["family"]: row for row in data["sports_coverage"]}
+        self.assertEqual(coverage["sports.world_cup"]["availability"], "live_signal_candidate")
+        self.assertEqual(coverage["sports.nba"]["availability"], "conditional_engine")
+        self.assertIn("current_sports_scan", data)
+        expansion = {row["family"]: row for row in data["expanded_market_coverage"]}
+        self.assertEqual(expansion["weather.hurricane_season"]["availability"], "live_signal_candidate")
+        self.assertEqual(expansion["energy.henry_hub_spot"]["availability"], "live_signal_candidate")
+        self.assertEqual(expansion["agriculture.commodity_price"]["availability"], "source_gated")
 
     def test_calibration_empty_state_is_honest(self):
         client, _ = client_for(self.tmp)  # report file does not exist
@@ -292,6 +303,61 @@ class OpsAndCalibrationTests(unittest.TestCase):
         fam = client.get("/v1/calibration/weather.temperature").json()
         self.assertIn("weather.temperature", fam["families"])
 
+    def test_calibration_model_route_is_exact_not_aggregate(self):
+        import json
+        v2 = {
+            "model_version": "weather-ensemble-v2", "evidence_type": "prospective_exact_model_version",
+            "precommitted_contract_rows": 20, "resolved_contract_rows": 12,
+            "unresolved_contract_rows": 8, "independent_event_groups": 3,
+            "calibration": {"count": 12, "brier_score": .13, "max_calibration_gap": .1},
+            "precommitted_by_probability_band": {"0.1-0.2": 7},
+            "calibration_by_probability_band": {"0.1-0.2": {"count": 5, "brier_score": .11}},
+            "probability_band_gate": {"bands": [{"bucket": "0.1-0.2",
+                "independent_event_groups": 2}]},
+        }
+        v3 = {
+            "model_version": "weather-ensemble-v3-power-calibrated",
+            "evidence_type": "prospective_exact_model_version",
+            "precommitted_contract_rows": 9, "resolved_contract_rows": 0,
+            "unresolved_contract_rows": 9, "independent_event_groups": 0, "calibration": None,
+        }
+        report = {
+            "created_at": "2026-07-13T00:00:00+00:00", "precommitted_forecasts": 99,
+            "resolved_forecasts": 50, "independent_resolved_event_groups": 10,
+            "calibration": {"overall": {"count": 50}},
+            "promotion_readiness": {"weather.temperature": {
+                "model_version": "weather-ensemble-v3-power-calibrated", "eligible": False,
+                "independent_event_groups": 0,
+            }},
+            "model_evidence": {"weather.temperature": {
+                "weather-ensemble-v2": v2,
+                "weather-ensemble-v3-power-calibrated": v3,
+            }},
+            "retrospective_validation": {"weather.temperature": {
+                "target_model_version": "weather-ensemble-v3-power-calibrated",
+                "source_model_version": "weather-ensemble-v2", "independent_event_groups": 3,
+                "counts_toward_prospective_promotion": False,
+            }},
+        }
+        path = Path(self.tmp) / "calibration_report.json"
+        path.write_text(json.dumps(report), encoding="utf-8")
+        client, _ = client_for(self.tmp)
+
+        exact = client.get("/v1/calibration/weather.temperature/weather-ensemble-v2").json()
+        self.assertEqual(exact["resolved_forecasts"], 12)
+        self.assertEqual(exact["independent_resolved_event_groups"], 3)
+        self.assertEqual(exact["calibration"]["count"], 12)
+        self.assertEqual(set(exact["model_evidence"]["weather.temperature"]), {"weather-ensemble-v2"})
+        self.assertEqual(exact["retrospective_validation"]["weather.temperature"]["source_model_version"],
+                         "weather-ensemble-v2")
+        band = client.get(
+            "/v1/calibration/weather.temperature/weather-ensemble-v2?probability_band=0.1-0.2"
+        ).json()
+        self.assertEqual(band["resolved_forecasts"], 5)
+        self.assertEqual(band["unresolved_forecasts"], 2)
+        self.assertEqual(band["independent_resolved_event_groups"], 2)
+        self.assertEqual(band["calibration"]["brier_score"], .11)
+
     def test_evidence_status(self):
         client, _ = client_for(self.tmp)
         data = client.get("/v1/evidence/status").json()
@@ -303,6 +369,8 @@ class OpsAndCalibrationTests(unittest.TestCase):
         schema = client.get("/openapi.json").json()
         self.assertEqual(schema["servers"], [{"url": "http://testserver"}])
         self.assertIn("/v1/check-market", schema["paths"])
+        self.assertEqual(schema["paths"]["/v1/signals"]["post"]["operationId"],
+                         "rwoo_best_signals")
 
 
 if __name__ == "__main__":

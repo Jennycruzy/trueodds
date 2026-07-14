@@ -64,6 +64,18 @@ def fetch_event(event_ticker: str, client: httpx.Client | None = None) -> dict:
             client.close()
 
 
+def fetch_series(category: str | None = None, client: httpx.Client | None = None) -> list[dict]:
+    """Discover series from venue metadata; avoids a stale hand-maintained registry."""
+    own_client = client is None
+    client = client or httpx.Client(timeout=30)
+    params = {"category": category} if category else None
+    try:
+        return _get_json(client, f"{BASE_URL}/series", params).get("series", [])
+    finally:
+        if own_client:
+            client.close()
+
+
 def fetch_markets(
     series_ticker: str,
     limit: int = 100,
@@ -117,12 +129,17 @@ def fetch_active_markets(
 
 
 def _series_category(series_ticker: str) -> str | None:
-    if series_ticker.startswith(("KXHIGH", "KXLOW")):
+    if series_ticker.startswith(("KXHIGH", "KXLOW", "KXHUR", "KXTROPSTORM")):
         return "Climate and Weather"
     if series_ticker.startswith(("KXCPI", "KXFED", "KXGDP", "KXU3", "KXPAYROLLS")):
         return "Economics"
     if series_ticker.startswith(("KXMENWORLDCUP", "KXNBA", "KXNFL", "KXMLB", "KXNHL")):
         return "Sports"
+    if series_ticker.startswith((
+        "KXWTI", "KXBRENT", "KXNATGAS", "KXNGAS", "KXAAAGAS", "KXHOIL",
+        "KXCORN", "KXWHEAT", "KXSOYBEAN", "KXCOFFEE", "KXCOCOA", "KXSUGAR", "KXLCATTLE",
+    )):
+        return "Commodities"
     return None
 
 
@@ -152,6 +169,8 @@ def to_canonical(event: dict, market: dict) -> CanonicalMarket:
         spread=spread,
         fetched_at=_now_iso(),
         yes_subtitle=market.get("yes_sub_title"),
+        trading_close_time=market.get("close_time"),
+        market_status=market.get("status"),
         raw={"event": ev, "market": market},
     )
 
@@ -177,6 +196,8 @@ def market_row_to_canonical(market: dict) -> CanonicalMarket:
         spread=spread,
         fetched_at=_now_iso(),
         yes_subtitle=market.get("yes_sub_title"),
+        trading_close_time=market.get("close_time"),
+        market_status=market.get("status"),
         raw={"market": market, "series_ticker": series_ticker},
     )
 

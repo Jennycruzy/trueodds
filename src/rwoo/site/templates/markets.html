@@ -56,12 +56,55 @@ Everything else fails closed. Supported venues: {{ venues|join(", ") }}.</p>
 <div class="note empty"><p>No opportunity scan snapshot is currently published. This is an honest empty state.</p></div>
 {% endif %}
 
+<h2>Expanded weather and commodity coverage</h2>
+<p>The current artifact contains <strong>{{ expansion_scan.rows }}</strong> rows in these expansion families.
+Series selection comes from current settlement-source metadata, not a fixed ticker allow-list.</p>
+<div class="table-scroll"><table>
+  <thead><tr><th scope="col">Market / family</th><th scope="col">Current state</th><th scope="col">What can be priced</th><th scope="col">Sources / limits</th></tr></thead>
+  <tbody>{% for s in expansion_coverage %}<tr>
+    <td><strong>{{ s.market }}</strong><br><code>{{ s.family }}</code></td><td><code>{{ s.availability }}</code></td>
+    <td class="small">{{ s.market_shapes|join(", ") if s.market_shapes else "No approved priced shape" }}</td>
+    <td class="small">{{ s.data_sources|join(", ") if s.data_sources else "No approved source adapter" }}<br><span class="muted">{{ s.limitations }}</span></td>
+  </tr>{% endfor %}</tbody>
+</table></div>
+
 <h2>Supported domains</h2>
 <div class="grid cols-3">
   {% for name, desc, level in supported %}
   <div class="card"><span class="tag">{{ level }}</span><h3>{{ name }}</h3><p class="small">{{ desc }}</p></div>
   {% endfor %}
 </div>
+
+<h2>Sports coverage by sport and market shape</h2>
+<p>The current artifact contains <strong>{{ sports_scan.sports_rows }}</strong> sports rows and
+<strong>{{ sports_scan.actionable_rows }}</strong> actionable sports candidates. Discovery is not support:
+markets without a bound source, parser, or model remain visible but fail closed.</p>
+<div class="table-scroll">
+  <table>
+    <thead><tr><th scope="col">Sport / family</th><th scope="col">Current state</th><th scope="col">What can be priced</th><th scope="col">Sources / limits</th></tr></thead>
+    <tbody>
+    {% for s in sports_coverage %}
+      <tr>
+        <td><strong>{{ s.sport }}</strong><br><code>{{ s.family }}</code></td>
+        <td><code>{{ s.availability }}</code></td>
+        <td class="small">{{ s.market_shapes|join(", ") if s.market_shapes else "No supported shape currently" }}</td>
+        <td class="small">{{ s.data_sources|join(", ") if s.data_sources else "No approved source/model" }}<br><span class="muted">{{ s.limitations }}</span></td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+
+{% if sports_scan.by_family %}
+<div class="grid cols-3" style="margin-top:1rem">
+  <div class="card"><h3>Current rows by family</h3><dl class="kv">
+    {% for k, v in sports_scan.by_family.items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+  <div class="card"><h3>Current rows by venue</h3><dl class="kv">
+    {% for k, v in sports_scan.by_venue.items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+  <div class="card"><h3>Current coverage states</h3><dl class="kv">
+    {% for k, v in sports_scan.by_coverage_status.items() %}<dt>{{ k }}</dt><dd>{{ v }}</dd>{% endfor %}</dl></div>
+</div>
+{% endif %}
 
 <h2>Kalshi series with a wired engine</h2>
 <div class="grid cols-3">

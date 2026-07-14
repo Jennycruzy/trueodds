@@ -6,9 +6,44 @@ states the fields that matter to the parser under test. `kalshi_raw` builds the
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any
 
+import httpx
+
 from rwoo.models import CanonicalMarket
+
+
+class ASGITestClient:
+    """Small synchronous facade over HTTPX's maintained ASGI transport.
+
+    Starlette's synchronous TestClient has changed transport implementations
+    across framework releases.  These tests only need HTTP requests, so using
+    the public ASGI transport directly keeps them deterministic and avoids a
+    thread-portal dependency.
+    """
+
+    def __init__(self, app, *, raise_server_exceptions: bool = True,
+                 base_url: str = "http://testserver"):
+        self.app = app
+        self.raise_server_exceptions = raise_server_exceptions
+        self.base_url = base_url
+
+    def request(self, method: str, path: str, **kwargs):
+        async def call():
+            transport = httpx.ASGITransport(
+                app=self.app, raise_app_exceptions=self.raise_server_exceptions,
+            )
+            async with httpx.AsyncClient(transport=transport, base_url=self.base_url) as client:
+                return await client.request(method, path, **kwargs)
+
+        return asyncio.run(call())
+
+    def get(self, path: str, **kwargs):
+        return self.request("GET", path, **kwargs)
+
+    def post(self, path: str, **kwargs):
+        return self.request("POST", path, **kwargs)
 
 
 def make_market(

@@ -12,29 +12,79 @@
   and payment configuration. <code>GET /v1/supported-markets</code> lists venues, families, and series.</p>
   <div class="table-scroll">
     <table>
-      <thead><tr><th scope="col">Service</th><th scope="col">Method &amp; path</th><th scope="col">Billing</th></tr></thead>
+      <thead><tr><th scope="col">Service / command</th><th scope="col">Method &amp; path</th><th scope="col">Billing role</th></tr></thead>
       <tbody>
       {% for s in services %}
-        <tr><td><code>{{ s.name }}</code></td><td class="path">{{ s.method }} {{ s.path }}</td><td>{{ "Paid" if s.paid else "Free" }}</td></tr>
+        <tr><td><code>{{ s.name }}</code><br><span class="small muted">{{ s.underscore }}</span></td><td class="path">{{ s.method }} {{ s.path }}</td><td>{{ "x402-capable" if s.paid else "Free evidence" }}</td></tr>
       {% endfor %}
       </tbody>
     </table>
   </div>
 </section>
 
+<section aria-labelledby="best-signals">
+  <h2 id="best-signals">Best Signals command</h2>
+  <p><strong>Command:</strong> <code>rwoo_best_signals</code> &middot;
+  <strong>Service:</strong> <code>rwoo.best_signals</code> &middot;
+  <strong>Endpoint:</strong> <code>POST /v1/signals</code></p>
+  <p>Send natural language such as <q>Give me the best weather signals now</q> or
+  <q>Give me the best signals on Kalshi</q>. The response ranks only candidates that pass the
+  current tradability gates. If none pass, it returns <code>status: "no_signal"</code> rather than an error.</p>
+  <pre>{"message":"Give me the best weather signals now","limit":5}</pre>
+</section>
+
+<section aria-labelledby="sports-coverage">
+  <h2 id="sports-coverage">Sports data available now</h2>
+  <p>Sports are disclosed per family and market shape. A registered model does not by itself mean a live,
+  actionable signal exists. The current scan contains <strong>{{ sports_scan.sports_rows }}</strong> sports rows,
+  of which <strong>{{ sports_scan.actionable_rows }}</strong> pass the scanner's actionability gates.</p>
+  <div class="table-scroll">
+    <table>
+      <thead><tr><th scope="col">Sport / family</th><th scope="col">Availability</th><th scope="col">Priced shapes and data</th><th scope="col">Honest boundary</th></tr></thead>
+      <tbody>
+      {% for s in sports_coverage %}
+        <tr>
+          <td><strong>{{ s.sport }}</strong><br><code>{{ s.family }}</code></td>
+          <td><code>{{ s.availability }}</code></td>
+          <td class="small">{{ s.market_shapes|join(", ") if s.market_shapes else "None currently" }}<br><span class="muted">{{ s.data_sources|join(", ") if s.data_sources else "No approved source/model" }}</span></td>
+          <td class="small">{{ s.limitations }}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="small">Machine-readable coverage and live counts: <code>GET /v1/supported-markets</code> →
+  <code>sports_coverage</code> and <code>current_sports_scan</code>.</p>
+</section>
+
+<section aria-labelledby="expanded-markets">
+  <h2 id="expanded-markets">Hurricane, energy, and agriculture coverage</h2>
+  <p>Series are discovered from venue settlement metadata on each scan. Discovery never bypasses source, shape, model, or evidence gates.</p>
+  <div class="table-scroll"><table>
+    <thead><tr><th scope="col">Market / family</th><th scope="col">Availability</th><th scope="col">Priced shapes</th><th scope="col">Sources / boundary</th></tr></thead>
+    <tbody>{% for s in expansion_coverage %}<tr>
+      <td><strong>{{ s.market }}</strong><br><code>{{ s.family }}</code></td><td><code>{{ s.availability }}</code></td>
+      <td class="small">{{ s.market_shapes|join(", ") if s.market_shapes else "No approved priced shape" }}</td>
+      <td class="small">{{ s.data_sources|join(", ") if s.data_sources else "No approved source adapter" }}<br><span class="muted">{{ s.limitations }}</span></td>
+    </tr>{% endfor %}</tbody>
+  </table></div>
+  <p class="small">Natural-language examples: <q>best hurricane signals</q> and <q>best Henry Hub natural gas signals</q>. An agriculture request is family-filtered but returns <code>no_signal</code> while source-gated.</p>
+</section>
+
 <section aria-labelledby="pay">
   <h2 id="pay">Payments — OKX Agent Payments (x402)</h2>
-  <p>Paid endpoints use the HTTP 402 flow. An unpaid request receives a <code>402</code> whose body is the x402
-  challenge (<code>x402Version</code> + <code>accepts[]</code>) with <code>WWW-Authenticate: Payment</code>. Re-send the
-  <em>identical</em> request body with an <code>X-PAYMENT</code> header; on success you receive <code>200</code>, a
+  <p>Paid endpoints use x402 v2. An unpaid request receives HTTP <code>402</code> with a base64-encoded
+  <code>PAYMENT-REQUIRED</code> header containing <code>x402Version: 2</code> and <code>accepts[]</code>.
+  The agent wallet signs an accepted payment and re-sends the <em>identical</em> request body with a
+  <code>PAYMENT-SIGNATURE</code> header; on success it receives <code>200</code>, a
   <code>PAYMENT-RESPONSE</code> header, and a receipt whose <code>payment_reference</code> links the settlement.</p>
   <ul class="small">
-    <li>The payment is bound to service, request hash, amount, recipient, asset, network, and expiry.</li>
-    <li>A used nonce is rejected (<code>PAYMENT_REPLAYED</code>); an <code>Idempotency-Key</code> retry never double-charges.</li>
+    <li>The official OKX middleware verifies and settles against the advertised amount, recipient, asset, network, and expiry.</li>
+    <li>An <code>Idempotency-Key</code> retry returns the cached decision rather than initiating another application-level charge.</li>
     <li>No buyer private key is ever accepted, and no signing flow is invented — your agent wallet produces the payload.</li>
   </ul>
-  <p class="small muted">Prices, asset, network, and recipient are set by the operator and appear in
-  <code>/v1/service-metadata</code>. Until configured, paid endpoints run in free mode or fail closed.</p>
+  <p class="small muted">Prices, asset, network, and recipient appear in <code>/v1/service-metadata</code>.
+  Payments remain visibly free while disabled and fail closed if enabled without complete settlement configuration.</p>
 </section>
 
 <section aria-labelledby="ex">

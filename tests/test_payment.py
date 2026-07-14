@@ -8,18 +8,20 @@ and no-double-charge.
 """
 from __future__ import annotations
 
+import base64
+import json
 import tempfile
 import time
 import unittest
 from pathlib import Path
-
-from fastapi.testclient import TestClient
+from unittest.mock import patch
 
 from rwoo.api.app import create_app
 from rwoo.api.config import Settings
 from rwoo.api import payment as pay
 from rwoo.api.payment import PaymentConfig, StubVerifier
 from tests.test_api import a_market, make_settings, priced_record
+from tests.support import ASGITestClient
 
 PRICE = "10000"  # atomic units
 
@@ -27,9 +29,10 @@ PRICE = "10000"  # atomic units
 def paid_config(**overrides) -> PaymentConfig:
     base = dict(
         enabled=True, mode="stub", environment="development", scheme="exact",
-        network="base-sepolia", asset="0xTOKEN", asset_name="USDC", asset_decimals=6,
+        network="base-sepolia", asset="0xTOKEN", asset_name="USDC", asset_version="2",
+        asset_decimals=6,
         recipient="0xRECIPIENT", max_timeout_seconds=300,
-        prices={"rwoo.check_market": PRICE, "rwoo.cross_venue_edge": PRICE},
+        prices={"rwoo.best_signals": PRICE, "rwoo.check_market": PRICE, "rwoo.cross_venue_edge": PRICE},
     )
     base.update(overrides)
     return PaymentConfig(**base)
@@ -44,7 +47,7 @@ def paid_client(tmp, config=None):
         evaluate=lambda market: priced_record(market),
         payment_config=config,
     )
-    return TestClient(app, raise_server_exceptions=False)
+    return ASGITestClient(app, raise_server_exceptions=False)
 
 
 def x_payment(config: PaymentConfig, request_hash: str, service="rwoo.check_market", **overrides) -> str:
@@ -216,6 +219,49 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertFalse(ready)
         self.assertIn("RWOO_PAYMENT_RECIPIENT", missing)
         self.assertIn("RWOO_PAYMENT_FACILITATOR_URL", missing)
+        self.assertIn("RWOO_PAYMENT_ASSET_VERSION", missing)
+
+    def test_facilitator_has_no_legacy_verify_only_path(self):
+        cfg = paid_config(mode="facilitator", okx_api_key="key", okx_secret_key="secret",
+                          okx_passphrase="pass", facilitator_url="https://web3.okx.com")
+        self.assertIsInstance(pay.select_verifier(cfg), pay.DisabledVerifier)
+
+    def test_official_v2_mainnet_challenge_fields(self):
+        from x402.schemas import SupportedKind, SupportedResponse
+
+        class FakeFacilitator:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def get_supported(self):
+                return SupportedResponse(kinds=[SupportedKind(
+                    x402_version=2, scheme="exact", network="eip155:196",
+                )])
+
+        cfg = paid_config(
+            mode="facilitator", environment="production", network="eip155:196",
+            asset="0x779ded0c9e1022225f8e0630b35a9b54be713736",
+            asset_name="USD₮0", asset_version="1", asset_decimals=6,
+            recipient="0x38c3299ee0e771e8d0a756e1a5dd4b8a8e9930ca",
+            facilitator_url="https://web3.okx.com", okx_api_key="key",
+            okx_secret_key="secret", okx_passphrase="pass", max_timeout_seconds=60,
+        )
+        with patch("x402.http.OKXFacilitatorClient", FakeFacilitator):
+            client = paid_client(tempfile.mkdtemp(), cfg)
+            response = client.post("/v1/signals", json={"message": "Give me the best signals"})
+
+        self.assertEqual(response.status_code, 402)
+        encoded = response.headers.get("PAYMENT-REQUIRED")
+        self.assertIsNotNone(encoded)
+        challenge = json.loads(base64.b64decode(encoded))
+        self.assertEqual(challenge["x402Version"], 2)
+        accepted = challenge["accepts"][0]
+        self.assertEqual(accepted["network"], "eip155:196")
+        self.assertEqual(accepted["asset"], cfg.asset)
+        self.assertEqual(accepted["amount"], PRICE)
+        self.assertEqual(accepted["payTo"], cfg.recipient)
+        self.assertEqual(accepted["maxTimeoutSeconds"], 60)
+        self.assertEqual(accepted["extra"], {"name": "USD₮0", "version": "1", "decimals": 6})
 
 
 if __name__ == "__main__":

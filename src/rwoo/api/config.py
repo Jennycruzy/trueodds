@@ -63,6 +63,9 @@ class Settings:
     # Request handling limits.
     max_body_bytes: int = field(default_factory=lambda: _env_int("RWOO_MAX_BODY_BYTES", 32_768))
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("RWOO_UPSTREAM_TIMEOUT_SECONDS", 20.0))
+    signal_scan_max_age_minutes: int = field(default_factory=lambda: _env_int("RWOO_SIGNAL_SCAN_MAX_AGE_MINUTES", 45))
+    signal_min_close_lead_minutes: int = field(default_factory=lambda: _env_int("RWOO_SIGNAL_MIN_CLOSE_LEAD_MINUTES", 60))
+    signal_max_spread: float = field(default_factory=lambda: _env_float("RWOO_SIGNAL_MAX_SPREAD", 0.12))
 
     # Payment configuration lives in rwoo.api.payment.PaymentConfig (its own
     # env surface). It is off by default and MUST NOT be enabled without an

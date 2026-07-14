@@ -9,6 +9,11 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import datetime
 
+# Precommitted production transform shared by the weather engine and evidence
+# report. One definition prevents silent model/report parameter drift.
+WEATHER_V3_CALIBRATION_GAMMA = 0.65
+WEATHER_V3_SOURCE_MODEL = "weather-ensemble-v2"
+
 
 @dataclass(frozen=True)
 class CalibrationRecord:
@@ -139,7 +144,7 @@ def recalibrate_by_bucket(records: list[CalibrationRecord], width: float = 0.2) 
     return details, brier
 
 
-def _power_transform(probability: float, gamma: float) -> float:
+def power_transform(probability: float, gamma: float) -> float:
     if probability <= 0.0:
         return 0.0
     if probability >= 1.0:
@@ -164,7 +169,7 @@ def fit_power_recalibration(records: list[CalibrationRecord]) -> dict:
     best_brier = original_brier
     for i in range(1, 201):
         gamma = i / 20
-        transformed = [(_power_transform(r.oracle_prob, gamma), r.outcome) for r in records]
+        transformed = [(power_transform(r.oracle_prob, gamma), r.outcome) for r in records]
         candidate_brier = sum((prob - outcome) ** 2 for prob, outcome in transformed) / len(transformed)
         if candidate_brier < best_brier:
             best_gamma = gamma
@@ -173,7 +178,7 @@ def fit_power_recalibration(records: list[CalibrationRecord]) -> dict:
         {
             "market_id": r.market_id,
             "original_prob": r.oracle_prob,
-            "recalibrated_prob": _power_transform(r.oracle_prob, best_gamma),
+            "recalibrated_prob": power_transform(r.oracle_prob, best_gamma),
             "outcome": r.outcome,
         }
         for r in records
@@ -206,7 +211,7 @@ def grouped_walk_forward(records: list[CalibrationRecord], min_train_groups: int
         fit = fit_power_recalibration(train)
         gamma = fit["gamma"]
         original = sum((r.oracle_prob - r.outcome) ** 2 for r in test) / len(test)
-        recalibrated = sum((_power_transform(r.oracle_prob, gamma) - r.outcome) ** 2 for r in test) / len(test)
+        recalibrated = sum((power_transform(r.oracle_prob, gamma) - r.outcome) ** 2 for r in test) / len(test)
         folds.append({"group": (test[0].source_run, test[0].target_date), "rows": len(test),
                       "gamma": gamma, "original_brier": original, "recalibrated_brier": recalibrated})
     if not folds:

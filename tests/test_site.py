@@ -11,10 +11,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from fastapi.testclient import TestClient
-
 from rwoo.api.config import Settings
 from rwoo.site.app import create_site
+from tests.support import ASGITestClient
 
 ROUTES = ["/", "/docs", "/playground", "/calibration", "/markets", "/receipts",
           "/methodology", "/status", "/privacy", "/terms",
@@ -67,13 +66,26 @@ def a_report():
             "independent_event_groups": 4, "eligible": False, "next_checkpoint": 30,
             "official_source_concordance_rate": 1.0, "official_source_checks": 4,
             "criteria": {"independent_groups_at_least_30": False}}},
+        "model_evidence": {"weather.temperature": {
+            "weather-ensemble-v2": {"precommitted_contract_rows": 10,
+                "resolved_contract_rows": 5, "independent_event_groups": 4,
+                "calibration": {"brier_score": .191}},
+        }},
+        "retrospective_validation": {"weather.temperature": {
+            "target_model_version": "weather-ensemble-v3-power-calibrated",
+            "source_model_version": "weather-ensemble-v2", "method": "power_transform",
+            "gamma": .65, "independent_event_groups": 4,
+            "original_calibration": {"brier_score": .191},
+            "transformed_calibration": {"brier_score": .18},
+            "grouped_walk_forward": {"improved": True},
+        }},
         "ledger_verification": {"valid": True, "record_count": 24},
         "selection_policy": "all priced records precommitted; losses retained",
     }
 
 
 def client(settings):
-    return TestClient(create_site(settings))
+    return ASGITestClient(create_site(settings))
 
 
 class RouteTests(unittest.TestCase):
@@ -97,6 +109,29 @@ class RouteTests(unittest.TestCase):
             self.assertIn('lang="en"', html, r)
             self.assertIn("Skip to content", html, r)
             self.assertIn("<h1", html, r)
+
+    def test_best_signals_is_discoverable(self):
+        c = client(settings_for(self.tmp))
+        docs = c.get("/docs").text
+        playground = c.get("/playground").text
+        self.assertIn("rwoo.best_signals", docs)
+        self.assertIn("rwoo_best_signals", docs)
+        self.assertIn("POST /v1/signals", docs)
+        self.assertIn("Give me the best weather signals now", docs)
+        self.assertIn("PAYMENT-REQUIRED", docs)
+        self.assertIn("PAYMENT-SIGNATURE", docs)
+        self.assertIn("rwoo_best_signals — Best Signals", playground)
+
+    def test_sports_are_documented_individually_with_truthful_states(self):
+        c = client(settings_for(self.tmp, scan=a_scan()))
+        for route in ("/docs", "/markets"):
+            html = c.get(route).text
+            for label in ("FIFA World Cup", "Tennis", "MLB / baseball", "Club soccer",
+                          "NBA / basketball", "NHL / hockey", "Esports"):
+                self.assertIn(label, html, (route, label))
+            self.assertIn("live_signal_candidate", html)
+            self.assertIn("conditional_engine", html)
+            self.assertIn("unsupported_fails_closed", html)
 
 
 class LiveDataTests(unittest.TestCase):
@@ -134,6 +169,9 @@ class LiveDataTests(unittest.TestCase):
         self.assertIn("0.191", html)   # brier from artifact
         self.assertIn("weather.temperature", html)
         self.assertIn("Evidence ledger verified", html)
+        self.assertIn("weather-ensemble-v2", html)
+        self.assertIn("weather-ensemble-v3-power-calibrated", html)
+        self.assertIn("does not count toward prospective promotion", html)
 
     def test_no_none_leak_in_cells(self):
         import re

@@ -1,6 +1,6 @@
 """Deterministic domain routing — keyword/category rules, never an LLM.
 
-This only sorts a market into weather/economics/sports/other so Stage 2 can
+This only sorts a market into weather/economics/sports/commodities/other so Stage 2 can
 pick an engine; it is not a probability and has no bearing on the
 Deterministic-Core Law either way, but it is kept rule-based for the same
 reason everything else is: reproducibility. Given the same market object,
@@ -19,13 +19,13 @@ KALSHI_CATEGORY_MAP = {
     "Climate and Weather": "weather",
     "Economics": "economics",
     "Financials": "economics",
-    "Commodities": "economics",
+    "Commodities": "commodities",
     "Sports": "sports",
 }
 
 _WEATHER_KEYWORDS = (
     "temperature", "high temp", "low temp", "rainfall", "rain", "snow",
-    "snowfall", "hurricane", "storm", "wind speed", "heat wave", "weather",
+    "snowfall", "hurricane", "hurricanes", "storm", "storms", "wind speed", "heat wave", "weather",
 )
 _ECON_KEYWORDS = (
     "cpi", "inflation", "gdp", "unemployment", "jobs report", "nonfarm",
@@ -34,6 +34,12 @@ _ECON_KEYWORDS = (
 _SPORTS_KEYWORDS = (
     "vs.", "vs ", "wins the", "championship", "playoff", "world cup",
     "super bowl", "nba", "nfl", "mlb", "nhl", "ncaa",
+)
+_COMMODITY_KEYWORDS = (
+    "wti", "brent crude", "brent oil", "brent price", "brent futures",
+    "crude oil", "natural gas", "henry hub", "gasoline",
+    "heating oil", "corn price", "wheat price", "soybean", "live cattle",
+    "coffee price", "cocoa price", "sugar price",
 )
 
 
@@ -51,6 +57,8 @@ def classify_polymarket(tag_labels: list[str], question: str) -> str:
         return "economics"
     if lowered & {"sports", "nba", "nfl", "mlb", "nhl", "soccer", "football"}:
         return "sports"
+    if lowered & {"commodities", "commodity", "oil", "natural gas", "agriculture"}:
+        return "commodities"
     return _classify_by_keywords(question)
 
 
@@ -73,6 +81,9 @@ def classify_limitless(categories: list[str], tags: list[str], question: str, de
 
     if labels & {"weather", "climate"} or _contains_any_keyword(text, _WEATHER_KEYWORDS):
         return "weather"
+
+    if labels & {"commodities", "commodity", "oil & gas", "agriculture"} or _contains_any_keyword(text, _COMMODITY_KEYWORDS):
+        return "commodities"
 
     # Limitless has many crypto/equity/commodity Up/Down markets. Those are
     # deliberately not routed into the economics engine unless the rule text
@@ -115,6 +126,8 @@ def _classify_by_keywords(question: str) -> str:
         return "economics"
     if _contains_any_keyword(q, _SPORTS_KEYWORDS):
         return "sports"
+    if _contains_any_keyword(q, _COMMODITY_KEYWORDS):
+        return "commodities"
     return "other"
 
 

@@ -22,6 +22,10 @@ from datetime import datetime, timezone
 
 import httpx
 
+from rwoo.calibration import (
+    WEATHER_V3_CALIBRATION_GAMMA, WEATHER_V3_SOURCE_MODEL, power_transform,
+)
+
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 NASA_POWER_URL = "https://power.larc.nasa.gov/api/temporal/daily/point"
 _FORECAST_CACHE: dict[tuple[float, float, str, str], dict[str, float]] = {}
@@ -325,13 +329,9 @@ def compute_weather_probability(
     # Precommitted v3 recalibration: fitted on the resolved v2 evidence and
     # accepted only after grouped walk-forward improvement across 152 later
     # independent event groups. gamma < 1 shrinks overconfident tails.
-    calibration_gamma = 0.65
+    calibration_gamma = WEATHER_V3_CALIBRATION_GAMMA
     def calibrate(probability: float) -> float:
-        if probability <= 0.0 or probability >= 1.0:
-            return probability
-        yes = probability ** calibration_gamma
-        no = (1.0 - probability) ** calibration_gamma
-        return yes / (yes + no)
+        return power_transform(probability, calibration_gamma)
     oracle_prob = calibrate(oracle_prob)
     per_model_prob = {model: calibrate(probability) for model, probability in per_model_prob.items()}
     prob_low = min(oracle_prob, *per_model_prob.values())
@@ -351,7 +351,7 @@ def compute_weather_probability(
     return {
         "oracle_prob": oracle_prob,
         "recalibration": {"method": "power_transform", "gamma": calibration_gamma,
-                          "evidence_model_version": "weather-ensemble-v2"},
+                          "evidence_model_version": WEATHER_V3_SOURCE_MODEL},
         "confidence": confidence,
         "prob_low": prob_low,
         "prob_high": prob_high,

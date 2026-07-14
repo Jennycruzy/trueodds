@@ -1,6 +1,108 @@
 # Build Gaps And Sequencing
 
-Last updated: 2026-07-12 (seventh session: SSH key-only access enabled and the
+## 2026-07-14 release-candidate audit
+
+The candidate was exercised on the VPS from
+`/opt/rwoo/staging/20260714-data-audit` before production deployment. Its full
+live scan completed without source errors across 5,929 canonical markets: 823
+were evaluated, 1,718 included, 895 unsupported, and 4,211 skipped. Expansion
+counts are now emitted explicitly, including zeros:
+
+- `weather.hurricane_season`: 25
+- `energy.henry_hub_spot`: 7
+- `energy.commodity_price`: 5
+- `agriculture.commodity_price`: 0
+
+The audit found and fixed two discovery defects before release: dated Henry Hub
+event tickers were assigning the wrong contract year, and the bare word
+“Brent” classified a candidate named Brent as crude oil. The seven current
+Henry Hub thresholds now bind to 2026 and correctly recognize the observed
+$30.72/MMBtu contract-year maximum.
+
+Henry Hub v2 has a leakage-safe rolling-year backtest using only prior years and
+the evaluation year's observations through July 13. Across 20 independent
+evaluation years and 140 threshold rows, its Brier score is 0.02141 versus
+0.25751 for the prior-year-frequency baseline. Historical closing prices were
+not captured for those contracts (`closing_market_rows=0`), so market
+outperformance is unproven and promotion remains false.
+
+NOAA outlook parsing is issue-date aware: May preseason ranges are conditioned
+on season-to-date NHC counts, while an August update is treated as an updated
+unconditional total and is not conditioned twice. Prospective evidence now
+skips forecasts made after the underlying event elapsed, closing quotes are
+accepted only before the trading/resolution cutoff, and signal ranking rejects
+elapsed events even if a venue remains administratively open.
+
+The release gate remains unchanged: funded execution is disabled until the
+exact deployed version beats both naive and closing-market baselines after
+costs on independent prospective outcomes. Closing-price capture and
+prospective resolutions take priority over adding more model families. The
+complete candidate suite passes **186 tests**.
+
+## 2026-07-13 current listing readiness (authoritative)
+
+The live release is `/opt/rwoo/releases/20260713-signals-v3`. API, site,
+scanner, and evidence services all run that release and the same weather model:
+`weather-ensemble-v3-power-calibrated`.
+
+Completed:
+
+- Natural-language `POST /v1/signals`, `GET /v1/signals`, and root `POST /`
+  accept requests such as “Give me the best weather signals now”.
+- Results are ranked and fail closed on stale scans, closed/unknown markets,
+  near-close contracts, missing executable quotes, excessive spread, model
+  mismatch, or missing positive post-cost edge.
+- Results disclose close time, spread, entry, expected profit, evidence state,
+  and a one-contract-only sizing scope. Execution recommendations remain locked
+  until the exact deployed model earns independent evidence.
+- Service metadata reports free versus paid state honestly. The official OKX
+  x402 v2 seller SDK is pinned; production facilitator mode has one
+  verify-and-settle path and fails closed if configuration is incomplete.
+- The evidence ledger is valid and current, but weather v3 still has zero
+  independently resolved groups from 888 prospective precommits. This is not
+  yet proof of live model quality. The public report now separately exposes
+  1,200 resolved v2 contract rows across 160 independent event groups and v3's
+  retrospective gamma-0.65 validation (Brier 0.1201; walk-forward improvement
+  across 152 test groups). Retrospective groups never increment v3 promotion.
+- Versioned calibration endpoints now return exact-version counts and scores;
+  probability-band filters are also scoped to that exact model. Agent signal
+  responses disclose retrospective support alongside the zero prospective v3
+  count without changing `execution_recommended=false`.
+
+Mainnet payment status:
+
+- Target network is X Layer mainnet (`eip155:196`), using USD₮0 at
+  `0x779ded0c9e1022225f8e0630b35a9b54be713736`, token version `1`, 6 decimals.
+- Payments remain deliberately disabled. Mainnet activation is blocked only on
+  the three OKX seller credentials: `RWOO_OKX_API_KEY`,
+  `RWOO_OKX_SECRET_KEY`, and `RWOO_OKX_PASSPHRASE`.
+- Install credentials directly in `/etc/rwoo/rwoo-release.env`; never paste
+  them into chat, source control, logs, or shell command arguments.
+- A buyer needs the payment token as well as gas. Gas alone cannot pay a
+  USD₮0-denominated request.
+
+Mainnet acceptance sequence after the credentials are installed:
+
+1. Confirm the three variables exist without printing their values, enable
+   payments, restart the API/site, and verify both remain healthy.
+2. Inspect the public unpaid `/v1/signals` response and validate its x402 v2
+   challenge: X Layer, USD₮0, expected recipient, amount, version, and timeout.
+3. From the external buyer, explicitly confirm one $0.01 payment before signing.
+   Keep the buyer private key only in that client's local environment.
+4. Replay the identical request with the signed payment; require HTTP 200,
+   `PAYMENT-RESPONSE`, a settlement transaction, and recipient balance change.
+5. Prove the authorization cannot be reused and retain sanitized evidence for
+   the OKX listing package.
+
+Listing surface note: the current product is an API service with A2MCP/x402
+delivery. That is a legitimate OKX service shape and does not require inventing
+an A2A agent card. If the selected listing form specifically requires an A2A
+agent service rather than an API service, implement and test the full A2A
+protocol separately; do not advertise the REST compatibility route as A2A.
+
+Last updated: 2026-07-13 (eighth session: restored key-only SSH after an
+override regression, stopped premature venue-resolution polling, and verified
+the live evidence loop; seventh session: SSH key-only access enabled and the
 legacy public artifact server retired safely; sixth session: DOMAIN LIVE — trueodd.xyz purchased,
 DNS set, and the ASP API + public site deployed to production over HTTPS with
 Let's Encrypt certs on the shared VPS; fifth session: callable ASP HTTP API,
@@ -8,6 +110,29 @@ OKX Agent Payments x402 402 flow, and the public web frontend built + tested +
 staged on the VPS; fourth session: recession-quarter routing wired + tested;
 third session: parser tests, Phase 9 coverage gate, tennis/NBA sources,
 head-to-head YES-side binding)
+
+## 2026-07-13 blocker remediation
+
+- Removed the later `00-enable-root-password.conf` override that had silently
+  defeated the key-only SSH configuration. A separate connection using the
+  workspace's authorized Ed25519 key succeeded before reload and again after
+  reload; password-only login now fails with `Permission denied (publickey)`.
+  Effective settings are `PermitRootLogin without-password`,
+  `PasswordAuthentication no`, and `KbdInteractiveAuthentication no`.
+- Added a resolution-time gate to the evidence loop. Forecasts whose declared
+  resolution time is still in the future remain pending without making a venue
+  request. This prevents thousands of premature Kalshi lookups every six hours.
+  The production acceptance run exited successfully with a valid keccak256
+  ledger and **0 resolution HTTP errors**, down from 62 in the preceding run.
+- Production verification passes: 98 current/scanner/evidence tests and 145
+  staged API/site/payment tests.
+- Both TrueOdd Let's Encrypt lineages pass isolated renewal dry-runs and remain
+  valid through 2026-10-09. The host-wide `certbot.service` still reports
+  failure because five unrelated legacy DuckDNS names are NXDOMAIN (one legacy
+  certificate is already expired). Their vhosts and renewal files were not
+  changed because the shared-box handoff forbids altering other tenants without
+  ownership/DNS authority. Restore those DNS records or explicitly retire those
+  tenant vhosts and certificate lineages to clear the host-wide failure.
 
 ## 2026-07-11 Session — Production deployment on trueodd.xyz (LIVE, RESUME HERE)
 
@@ -60,7 +185,7 @@ hardening/product, not launch-blocking.
   8090 and 8091 remain localhost-only, and public site/API HTTPS health checks
   passed after the change.
 
-### Remaining (optional / non-launch-blocking)
+### Historical remaining list (superseded by the authoritative section above)
 
 1. **Payments go-live**: still needs OKX network+asset+decimals, pay-to
    recipient, per-service prices, facilitator URL + verify schema. Until then
@@ -109,10 +234,11 @@ LIVE section above). The build details below remain accurate.
   payment to service, request hash, amount, recipient, asset, network, expiry;
   rejects wrong-chain/token/recipient, insufficient, expired, replayed,
   malformed, and any secret key material. Prices/asset/network/recipient come
-  ONLY from env; cryptographic settlement is delegated to an injected verifier
-  (`FacilitatorVerifier` is structural, not exercised). Dev `StubVerifier`
-  cannot run in production; an enabled-but-incomplete config fails closed at
-  boot. **Disabled by default (free mode).**
+  ONLY from env. The former structural verify-only facilitator path has since
+  been removed; live mode uses the official OKX v2 verify-and-settle
+  middleware. Dev `StubVerifier` cannot run in production; an
+  enabled-but-incomplete config fails closed at boot. **Disabled by default
+  (free mode).**
 - **Public frontend** — `rwoo.site.app:app` (separate FastAPI app, Jinja2). All
   10 pages (`/`, `/docs`, `/playground`, `/calibration`, `/markets`,
   `/receipts`, `/methodology`, `/status`, `/privacy`, `/terms`) + robots,

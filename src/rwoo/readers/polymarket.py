@@ -90,6 +90,8 @@ def to_canonical(market: dict) -> CanonicalMarket:
         spread=spread,
         fetched_at=_now_iso(),
         yes_subtitle=yes_subtitle,
+        trading_close_time=market.get("endDate"),
+        market_status="closed" if market.get("closed") else ("active" if market.get("active", True) else "inactive"),
         raw=market,
     )
 

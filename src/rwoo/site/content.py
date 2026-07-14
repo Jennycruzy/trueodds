@@ -22,6 +22,14 @@ WORKFLOW_STEPS = [
 
 SERVICES = [
     {
+        "name": "rwoo.best_signals",
+        "underscore": "rwoo_best_signals",
+        "path": "/v1/signals",
+        "method": "POST",
+        "paid": True,
+        "blurb": "Natural-language command returning ranked, currently open signals after freshness, close-time, executable-price, spread, model-version, and evidence checks.",
+    },
+    {
         "name": "rwoo.check_market",
         "underscore": "rwoo_check_market",
         "path": "/v1/check-market",
@@ -70,9 +78,11 @@ CROSS_VENUE_RISK = ("Complementary executable-price edge, subject to fill, custo
                     "venue, cancellation, and settlement risk.")
 
 SUPPORTED_DOMAINS = [
-    ("Weather", "Flagship. Daily temperature maxima/minima and precipitation for stations with a verified GHCND identity, against NWS/NOAA settlement.", "supported"),
+    ("Weather", "Daily temperature maxima/minima and precipitation for verified stations, plus NOAA-resolved Atlantic seasonal named-storm, hurricane, and major-hurricane count thresholds.", "supported"),
     ("Economics", "Headline & core CPI, GDP, unemployment, payrolls, Fed rate decisions, and recession-quarter nowcasts against official releases.", "supported"),
-    ("Sports", "Data-resolvable structures with a wired engine (e.g. World Cup stage-of-elimination, and match engines behind coverage gates).", "partial"),
+    ("Sports", "World Cup winner and stage-of-elimination markets currently produce candidates. Tennis, MLB, and club-soccer match engines are conditional; NBA, NHL, esports, props, and unsupported outrights fail closed as detailed below.", "partial"),
+    ("Energy", "EIA-resolved Henry Hub annual-high thresholds are priced from official daily history. Other energy price definitions remain source-gated.", "partial"),
+    ("Agriculture", "Agricultural markets are classified and measured, but exact price-feed and USDA report shapes remain source-gated until verified open contracts exist.", "discovery"),
 ]
 
 DEFERRED_DOMAINS = [
@@ -103,7 +113,7 @@ ERROR_TABLE = [
 ]
 
 CHANGELOG = [
-    ("v1.0.0", "Initial ASP surface: three services, receipts, calibration evidence, and the OKX Agent Payments (x402) 402 flow. Funded execution remains disabled."),
+    ("v1.0.0", "ASP surface: Best Signals plus three supporting services, receipts, calibration evidence, and the OKX Agent Payments (x402) 402 flow. Funded execution remains disabled."),
 ]
 
 
@@ -111,34 +121,37 @@ def code_examples(api_base: str) -> dict[str, str]:
     """Client snippets, generated against the configured API base URL. No
     signatures or secrets appear — the payment payload is produced by the
     caller's own wallet/agent, never here."""
-    body = '{"market": {"venue": "kalshi", "market_id": "KXHIGHNY-26JUL12-B85"}}'
+    body = '{"message":"Give me the best weather signals now","limit":5}'
     return {
         "curl": (
-            f"curl -sS -X POST {api_base}/v1/check-market \\\n"
+            f"curl -sS -X POST {api_base}/v1/signals \\\n"
             f"  -H 'Content-Type: application/json' \\\n"
             f"  -d '{body}'\n"
-            f"# A paid deployment answers 402 with an x402 challenge first;\n"
-            f"# re-send the identical body plus an X-PAYMENT header to receive 200."
+            f"# A paid deployment answers 402 with a PAYMENT-REQUIRED header;\n"
+            f"# have the agent wallet sign it, then re-send the identical body\n"
+            f"# with PAYMENT-SIGNATURE to receive 200."
         ),
         "python": (
             "import httpx\n\n"
             f'BASE = "{api_base}"\n'
-            'req = {"market": {"venue": "kalshi", "market_id": "KXHIGHNY-26JUL12-B85"}}\n'
-            'r = httpx.post(f"{BASE}/v1/check-market", json=req, timeout=30)\n'
+            'req = {"message": "Give me the best weather signals now", "limit": 5}\n'
+            'r = httpx.post(f"{BASE}/v1/signals", json=req, timeout=30)\n'
             "if r.status_code == 402:\n"
-            "    challenge = r.json()          # x402: pay with your agent wallet,\n"
-            "    # then re-POST the same body with the X-PAYMENT header.\n"
+            "    challenge = r.headers['PAYMENT-REQUIRED']\n"
+            "    # Agent wallet signs the challenge; retry the identical body\n"
+            "    # with the resulting PAYMENT-SIGNATURE header.\n"
             "print(r.json())"
         ),
         "typescript": (
             f'const BASE = "{api_base}";\n'
-            'const req = { market: { venue: "kalshi", market_id: "KXHIGHNY-26JUL12-B85" } };\n'
-            'const r = await fetch(`${BASE}/v1/check-market`, {\n'
+            'const req = { message: "Give me the best weather signals now", limit: 5 };\n'
+            'const r = await fetch(`${BASE}/v1/signals`, {\n'
             '  method: "POST",\n'
             '  headers: { "Content-Type": "application/json" },\n'
             "  body: JSON.stringify(req),\n"
             "});\n"
-            "// On 402, read the x402 challenge and retry with an X-PAYMENT header.\n"
+            "// On 402, read PAYMENT-REQUIRED, sign with the agent wallet,\n"
+            "// then retry the identical body with PAYMENT-SIGNATURE.\n"
             "console.log(await r.json());"
         ),
         "agent_json": body,

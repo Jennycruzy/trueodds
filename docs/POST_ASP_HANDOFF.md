@@ -1,30 +1,36 @@
-# Post-ASP Handoff: What Happens After Claude Finishes
+# Post-ASP Handoff: Mainnet Listing Acceptance
 
-Last updated: 2026-07-10  
-Current live report: 777 precommitted forecasts, 0 resolved, valid ledger,
-weather checkpoint locked at 0/30 independent resolved events.
+Last updated: 2026-07-13
+
+The callable natural-language signal layer is deployed on `trueodd.xyz`, and
+all production services use the weather v3 model. Payments target X Layer
+mainnet only and remain disabled until OKX seller credentials are installed
+securely. No testnet payment is part of this handoff.
 
 ## Two workstreams continue in parallel
 
-### A. Launch the paid oracle now
+### A. Prove the paid oracle on mainnet
 
-The ASP does not need to wait for 30 weather events to launch. After Claude
-finishes the pages and endpoints, complete these steps in order:
+Do not enable payments until the operator installs the three OKX seller
+credential variables directly on the VPS. Do not send them through chat. Then:
 
-1. Review Claude's diff; preserve the deterministic engine and all 94+ tests.
-2. Supply the operator-controlled domain and DNS access.
-3. Supply the OKX payment recipient, approved network/asset, and per-call prices.
-4. Deploy the frontend and API behind dedicated HTTPS hostnames.
-5. Verify internal API/frontend ports are not public.
-6. From a separate client, prove unpaid request -> valid HTTP 402 -> explicitly
+1. Run the complete production-compatible suite before restart.
+2. Verify the unpaid response advertises x402 v2, X Layer `eip155:196`, USD₮0,
+   the configured recipient, $0.01 price, and the intended timeout.
+3. Ensure the external buyer has USD₮0 plus sufficient X Layer gas; gas alone
+   is not the payment asset.
+4. From that separate client, prove unpaid request -> valid HTTP 402 -> explicitly
    confirmed payment -> HTTP 200 oracle response.
-7. Confirm the payment settles to the configured recipient and cannot be replayed.
-8. Confirm the paid response creates a linked oracle receipt.
-9. Run external health, OpenAPI, docs, mobile, TLS, and rollback smoke tests.
-10. Register the three services and submit the ASP for OKX.AI review.
-11. While review runs, prepare the <=90-second demo, X post with `#OKXAI`, and
+5. Keep the private key only in the buyer's local environment; never copy it to
+   the VPS, repository, request body, logs, or chat.
+6. Confirm settlement to the recipient and prove the authorization cannot be replayed.
+7. Confirm the paid response creates a linked oracle receipt.
+8. Run external health, OpenAPI, docs, TLS, and rollback smoke tests.
+9. Register the service as API/A2MCP+x402. Build A2A separately only if the
+   chosen OKX listing type explicitly requires it.
+10. While review runs, prepare the <=90-second demo, X post with `#OKXAI`, and
     submission form fields.
-12. Seed genuine paid calls only through normal confirmed buyer flows; never
+11. Seed genuine paid calls only through normal confirmed buyer flows; never
     fabricate orders, revenue, reviews, or users.
 
 Required operator inputs are tracked in the callable-ASP build prompt. None may

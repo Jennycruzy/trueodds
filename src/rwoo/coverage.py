@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from rwoo.parsers import parse_economics_market, parse_sports_market, parse_weather_market
+from rwoo.parsers import parse_commodity_market, parse_economics_market, parse_sports_market, parse_weather_market
 
 
 @dataclass(frozen=True)
@@ -28,7 +28,7 @@ def classify_market_shape(market) -> MarketCoverage:
             family="other",
             shape="unsupported_domain",
             status="unsupported_domain",
-            reason="outside weather/economics/sports coverage",
+            reason="outside weather/economics/sports/commodities coverage",
         )
 
     if market.venue == "kalshi" and market.domain == "weather":
@@ -76,6 +76,15 @@ def classify_market_shape(market) -> MarketCoverage:
                 reason=parsed.reason,
             )
         return _sports_shape_from_text(text, venue=market.venue)
+
+    if market.domain == "commodities":
+        parsed = parse_commodity_market(market)
+        if parsed is not None:
+            return MarketCoverage(parsed.family, parsed.shape, parsed.status, parsed.reason)
+        return MarketCoverage(
+            family="commodities", shape="unknown_commodity", status="parse_missing",
+            reason=f"{market.venue} commodity market included, but its underlying/source/strike shape is not bound",
+        )
 
     if market.domain == "economics":
         parsed = parse_economics_market(market)

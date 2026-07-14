@@ -15,10 +15,38 @@ import re
 import time
 import zipfile
 import xml.etree.ElementTree as ET
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from functools import wraps
 
 import httpx
+
+_SOURCE_CACHE: ContextVar[dict | None] = ContextVar("rwoo_source_cache", default=None)
+
+
+@contextmanager
+def source_cache_scope():
+    """Reuse immutable source snapshots only inside one coherent scan."""
+    token = _SOURCE_CACHE.set({})
+    try:
+        yield
+    finally:
+        _SOURCE_CACHE.reset(token)
+
+
+def scan_cached(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        cache = _SOURCE_CACHE.get()
+        if cache is None:
+            return func(*args, **kwargs)
+        key = (func.__name__, args, tuple(sorted(kwargs.items())))
+        if key not in cache:
+            cache[key] = func(*args, **kwargs)
+        return cache[key]
+    return wrapper
 
 CLEVELAND_NOWCAST_URL = "https://www.clevelandfed.org/indicators-and-data/inflation-nowcasting"
 SPF_PROBABILITY_URL = (
@@ -92,6 +120,7 @@ def _get_with_retry(url: str, timeout: float = 30, attempts: int = 3) -> httpx.R
     raise last_exc
 
 
+@scan_cached
 def fetch_cleveland_nowcasts() -> list[ClevelandNowcast]:
     """Parse the official Cleveland Fed daily nowcasting page.
 
@@ -201,10 +230,12 @@ def parse_spf_release_dates(text: str) -> dict[tuple[int, int], date]:
     return release_dates
 
 
+@scan_cached
 def fetch_spf_release_dates() -> dict[tuple[int, int], date]:
     return parse_spf_release_dates(_get_with_retry(SPF_RELEASE_DATES_URL).text)
 
 
+@scan_cached
 def fetch_spf_prccpi_rows() -> list[SpfProbabilityRow]:
     """Official Philadelphia Fed SPF PRCCPI probability rows.
 
@@ -315,6 +346,7 @@ class ClevelandYoyNowcast:
     updated: str
 
 
+@scan_cached
 def fetch_cleveland_yoy_nowcasts() -> list[ClevelandYoyNowcast]:
     text = _get_with_retry(CLEVELAND_NOWCAST_URL).text
     plain = html.unescape(re.sub(r"<[^>]+>", " ", text))
@@ -407,6 +439,7 @@ def _spf_workbook() -> bytes:
     return _SPF_WORKBOOK_CACHE["prob"]
 
 
+@scan_cached
 def fetch_spf_density_rows(variable: str) -> list[SpfProbabilityRow]:
     """Density rows for PRGDP or PRUNEMP, current bin era only.
 
@@ -465,6 +498,7 @@ class SpfRecessRow:
     source_available_at: str
 
 
+@scan_cached
 def fetch_spf_recess_rows() -> list[SpfRecessRow]:
     """The SPF 'anxious index': mean probability of a DECLINE in real GDP in
     the survey quarter and each of the next four quarters (RECESS1..RECESS5)."""
@@ -555,6 +589,7 @@ def event_probability_from_bins(
 # --------------------------------------------------------------------------
 
 
+@scan_cached
 def fetch_fred_series(series_id: str) -> list[tuple[date, float]]:
     """A FRED public no-key CSV series (fredgraph.csv). FRED mirrors official
     BLS/Fed series; used for series whose BLS flat files are hundreds of MB.
@@ -611,6 +646,7 @@ def parse_fomc_meeting_dates(page_html: str) -> list[date]:
     return sorted(by_month.values())
 
 
+@scan_cached
 def fetch_fomc_meeting_dates() -> list[date]:
     return parse_fomc_meeting_dates(_get_with_retry(FOMC_CALENDAR_URL, timeout=45).text)
 
@@ -644,6 +680,7 @@ def _excel_serial_to_date(serial: float) -> date:
     return date(1899, 12, 30) + timedelta(days=int(serial))
 
 
+@scan_cached
 def fetch_gdpnow_current() -> GdpNowcast:
     """Latest GDPNow nowcast from the official tracking workbook's
     TrackingHistory sheet (row layout verified live 2026-07-09: header
@@ -698,6 +735,7 @@ def fetch_gdpnow_current() -> GdpNowcast:
     return nowcast
 
 
+@scan_cached
 def fetch_gdpnow_track_record() -> list[GdpNowHistoricalForecast]:
     """Official real-time GDPNow forecasts paired with BEA advance estimates."""
     content = _get_with_retry(GDPNOW_WORKBOOK_URL, timeout=90).content
@@ -729,6 +767,7 @@ def fetch_gdpnow_track_record() -> list[GdpNowHistoricalForecast]:
     return out
 
 
+@scan_cached
 def fetch_gdpnow_tracking_archives() -> list[tuple[date, str, float]]:
     """Parse the workbook's transposed most-recent archived quarter path."""
     content = _get_with_retry(GDPNOW_WORKBOOK_URL, timeout=90).content

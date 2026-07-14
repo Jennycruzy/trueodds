@@ -252,6 +252,10 @@ def to_canonical(market: dict, parent: dict | None = None) -> CanonicalMarket:
         # raw "A vs B" title (no per-outcome child) binds to neither player and
         # so is correctly left unbindable downstream.
         yes_subtitle=market.get("title"),
+        trading_close_time=_timestamp_ms_to_iso(
+            market.get("expirationTimestamp") or (parent or {}).get("expirationTimestamp")
+        ),
+        market_status=str(market.get("status") or (parent or {}).get("status") or "active").lower(),
         raw=raw,
     )
 

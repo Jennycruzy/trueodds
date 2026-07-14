@@ -74,6 +74,13 @@ class CrossVenueRequest(_StrictModel):
     )
 
 
+class SignalRequest(_StrictModel):
+    message: str = Field(..., min_length=3, max_length=500, examples=["Give me the best weather signals now"])
+    limit: int = Field(default=5, ge=1, le=10)
+    min_minutes_to_close: int | None = Field(default=None, ge=5, le=10080)
+    cursor: str | None = Field(default=None, min_length=8, max_length=500)
+
+
 # ----------------------------- responses ----------------------------------
 
 
@@ -164,6 +171,18 @@ class CrossVenueResponse(_OpenModel):
     risk_disclosure: str | None = None
     reason: str | None = None
     receipt: ReceiptRef | None = None
+
+
+class SignalResponse(_OpenModel):
+    request_id: str
+    service: str
+    status: str
+    created_at: str
+    answer: str
+    signals: list[dict[str, Any]] = Field(default_factory=list)
+    filters: dict[str, Any] = Field(default_factory=dict)
+    pagination: dict[str, Any] = Field(default_factory=dict)
+    evidence_notice: str | None = None
 
 
 class ErrorEnvelope(_OpenModel):

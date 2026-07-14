@@ -19,8 +19,10 @@ from rwoo.api.config import Settings, get_settings
 from rwoo.api import services
 from rwoo.api.receipt_store import DecisionReceiptStore
 from rwoo.identity import MODEL_VERSIONS, model_version
+from rwoo.expansion_coverage import EXPANSION_COVERAGE, expansion_scan_summary
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES
 from rwoo.site import content
+from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 
 _HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(_HERE / "templates"))
@@ -136,6 +138,7 @@ def create_site(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/docs", response_class=HTMLResponse)
     async def docs(request: Request):
+        scan = _scan(settings)
         return render(
             request, "docs.html", "/docs",
             services=content.SERVICES,
@@ -143,6 +146,10 @@ def create_site(settings: Settings | None = None) -> FastAPI:
             examples=content.code_examples(settings.api_base_url.rstrip("/")),
             changelog=content.CHANGELOG,
             model_versions=MODEL_VERSIONS,
+            sports_coverage=SPORTS_COVERAGE,
+            sports_scan=sports_scan_summary(scan),
+            expansion_coverage=EXPANSION_COVERAGE,
+            expansion_scan=expansion_scan_summary(scan),
         )
 
     @app.get("/playground", response_class=HTMLResponse)
@@ -165,6 +172,10 @@ def create_site(settings: Settings | None = None) -> FastAPI:
             deferred=content.DEFERRED_DOMAINS,
             series={"weather": WEATHER_SERIES, "economics": ECONOMICS_SERIES, "sports": SPORTS_SERIES},
             venues=["kalshi", "polymarket", "limitless"],
+            sports_coverage=SPORTS_COVERAGE,
+            sports_scan=sports_scan_summary(scan),
+            expansion_coverage=EXPANSION_COVERAGE,
+            expansion_scan=expansion_scan_summary(scan),
         )
 
     @app.get("/receipts", response_class=HTMLResponse)

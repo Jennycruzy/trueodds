@@ -12,6 +12,7 @@ from rwoo.parsers import parse_market
 from rwoo.engines.weather import compute_weather_probability, event_probability
 from tests.support import kalshi_raw, make_market
 from rwoo.weather_stations import station_for_series
+from rwoo.readers.kalshi import market_row_to_canonical
 
 
 def _kalshi_weather(series_ticker, event_ticker, **fields):
@@ -20,6 +21,25 @@ def _kalshi_weather(series_ticker, event_ticker, **fields):
 
 
 class KalshiWeatherRoutingTests(unittest.TestCase):
+    def test_live_shape_hurricane_row_is_classified_as_weather(self):
+        market = market_row_to_canonical({
+            "ticker": "KXHURCTOT-26DEC01-T6", "event_ticker": "KXHURCTOT-26DEC01",
+            "title": "Will there be more than 6 Atlantic hurricanes in 2026?",
+            "strike_type": "greater", "floor_strike": 6,
+        })
+        self.assertEqual(market.domain, "weather")
+        self.assertEqual(parse_market(market).family, "weather.hurricane_season")
+
+    def test_hurricane_count_uses_structured_threshold_and_timestamp_year(self):
+        parsed = _kalshi_weather(
+            "KXHURCTOT", "KXHURCTOT-26", strike_type="greater", floor_strike="6"
+        )
+        self.assertEqual((parsed.family, parsed.shape),
+                         ("weather.hurricane_season", "atlantic_season_count"))
+        self.assertEqual(parsed.status, "engine_available")
+        self.assertEqual(parsed.metric, "hurricanes")
+        self.assertEqual(parsed.target_year, 2026)
+
     def test_registered_high_series_routes_to_station(self):
         parsed = _kalshi_weather(
             "KXHIGHNY", "KXHIGHNY-26JUL09", strike_type="greater", floor_strike="90"

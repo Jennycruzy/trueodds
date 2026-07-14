@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -46,10 +47,15 @@ from rwoo.api.schemas import (
     CrossVenueRequest,
     CrossVenueResponse,
     ErrorEnvelope,
+    SignalRequest,
+    SignalResponse,
 )
 from rwoo.api import services
+from rwoo.api.signals import SERVICE as SIGNAL_SERVICE, rank_signals
 from rwoo.identity import MODEL_VERSIONS
+from rwoo.expansion_coverage import EXPANSION_COVERAGE, expansion_scan_summary
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES, evaluate_market
+from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 
 REQUEST_ID_HEADER = "X-Request-ID"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -68,6 +74,7 @@ def _request_id(request: Request) -> str:
 
 
 _SERVICE_DESCRIPTION = {
+    "rwoo.best_signals": "Ranked conversational signals filtered for freshness, trading close, executable quotes, spread, model consistency, and evidence.",
     "rwoo.check_market": "Independent probability, interval, executable-price EV, why-trace, and receipt for one market.",
     "rwoo.cross_venue_edge": "Conservative cross-venue equivalence and executable complementary edge with risk disclosure.",
 }
@@ -82,6 +89,10 @@ def enforce_payment(request: Request, service: str, payload: dict[str, Any]) -> 
     """
     config: PaymentConfig = request.app.state.payment_config
     if not config.enabled:
+        return None
+    # The official middleware has already verified and settled facilitator
+    # payments before the request can reach this handler.
+    if config.mode == "facilitator":
         return None
     resource = request.url.path
     req_hash = request_hash(payload)
@@ -132,7 +143,10 @@ def create_app(
         docs_url="/docs",
         redoc_url="/redoc",
         openapi_url="/openapi.json",
-        contact={"name": "Real-World Odds Oracle", "email": settings.support_email},
+        contact=(
+            {"name": "Real-World Odds Oracle", "email": settings.support_email}
+            if not settings.support_email.endswith(".invalid") else None
+        ),
         license_info={"name": "See repository LICENSE"},
     )
 
@@ -144,6 +158,9 @@ def create_app(
     app.state.payment_config = payment_config
     app.state.payment_verifier = payment_verifier if payment_verifier is not None else select_verifier(payment_config)
     app.state.replay_store = ReplayStore()
+
+    if payment_config.enabled and payment_config.mode == "facilitator":
+        _install_official_x402(app, payment_config)
 
     # --- middleware (added last runs first / outermost) ---
     app.add_middleware(
@@ -202,6 +219,110 @@ def _error_response(exc: OracleError, request_id: str) -> JSONResponse:
     return resp
 
 
+def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
+    """Install the upstream x402 v2 verify+settle middleware for live mode."""
+    try:
+        from x402.http import (
+            OKXAuthConfig,
+            OKXFacilitatorClient,
+            OKXFacilitatorConfig,
+            PaymentOption,
+        )
+        from x402.http.facilitator_client_base import FacilitatorResponseError
+        from x402.http.middleware.fastapi import PaymentMiddlewareASGI
+        from x402.http.okx_facilitator_client import OKXFacilitatorResponseError
+        from x402.http.types import RouteConfig
+        from x402.mechanisms.evm.exact.server import ExactEvmScheme
+        from x402.schemas import AssetAmount
+        from x402.server import x402ResourceServer
+    except ImportError as exc:
+        raise RuntimeError("live payments require the pinned OKX x402 seller SDK") from exc
+
+    if not str(config.network).startswith("eip155:"):
+        raise RuntimeError("live x402 EVM network must use a CAIP-2 eip155:<chain-id> identifier")
+    raw_facilitator = OKXFacilitatorClient(OKXFacilitatorConfig(
+        auth=OKXAuthConfig(
+            api_key=str(config.okx_api_key),
+            secret_key=str(config.okx_secret_key),
+            passphrase=str(config.okx_passphrase),
+        ),
+        base_url=str(config.facilitator_url),
+        sync_settle=True,
+    ))
+
+    class _SafeOKXFacilitator:
+        """Normalize an upstream OKX SDK error-type mismatch for middleware.
+
+        Version 0.1.1 raises ``OKXFacilitatorResponseError`` while its FastAPI
+        middleware catches only ``FacilitatorResponseError``. Translate that
+        narrow case so expired/invalid credentials or facilitator downtime
+        produce a controlled 502 rather than an application 500.
+        """
+
+        def __init__(self, client):
+            self._client = client
+
+        @staticmethod
+        def _normalized(exc: Exception) -> FacilitatorResponseError:
+            return FacilitatorResponseError("OKX payment facilitator is unavailable")
+
+        def get_supported(self):
+            try:
+                return self._client.get_supported()
+            except OKXFacilitatorResponseError as exc:
+                raise self._normalized(exc) from exc
+
+        async def verify(self, payload, requirements):
+            try:
+                return await self._client.verify(payload, requirements)
+            except OKXFacilitatorResponseError as exc:
+                raise self._normalized(exc) from exc
+
+        async def verify_signature(self, payload, requirements=None):
+            try:
+                return await self._client.verify_signature(payload, requirements)
+            except OKXFacilitatorResponseError as exc:
+                raise self._normalized(exc) from exc
+
+        async def settle(self, payload, requirements):
+            try:
+                return await self._client.settle(payload, requirements)
+            except OKXFacilitatorResponseError as exc:
+                raise self._normalized(exc) from exc
+
+    facilitator = _SafeOKXFacilitator(raw_facilitator)
+    server = x402ResourceServer(facilitator)
+    server.register(config.network, ExactEvmScheme())
+
+    routes = {}
+    for method, path, service in (
+        ("POST", "/v1/signals", SIGNAL_SERVICE),
+        ("GET", "/v1/signals", SIGNAL_SERVICE),
+        ("POST", "/", SIGNAL_SERVICE),
+        ("POST", "/v1/check-market", services.CHECK_MARKET_SERVICE),
+        ("POST", "/v1/cross-venue-edge", services.CROSS_VENUE_SERVICE),
+    ):
+        routes[f"{method} {path}"] = RouteConfig(
+            accepts=[PaymentOption(
+                scheme=config.scheme,
+                pay_to=str(config.recipient),
+                price=AssetAmount(
+                    amount=str(config.price_for(service)), asset=str(config.asset),
+                    extra={
+                        "name": config.asset_name or "token",
+                        "version": config.asset_version,
+                        "decimals": config.asset_decimals,
+                    },
+                ),
+                network=config.network,
+                max_timeout_seconds=config.max_timeout_seconds,
+            )],
+            mime_type="application/json",
+            description=_SERVICE_DESCRIPTION[service],
+        )
+    app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
+
+
 def _register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(OracleError)
     async def _oracle_error(request: Request, exc: OracleError):
@@ -237,12 +358,58 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
 def _register_routes(app: FastAPI, settings: Settings) -> None:
     # ------------------------- paid services -------------------------
+    async def _best_signals(request: Request, body: SignalRequest):
+        payload = body.model_dump()
+        enforce_payment(request, SIGNAL_SERVICE, payload)
+        scan = services.load_json_artifact(settings.opportunity_scan_path)
+        calibration = services.load_json_artifact(settings.calibration_report_path)
+        ranked = rank_signals(
+            scan=scan, calibration=calibration, message=body.message, limit=body.limit,
+            now=datetime.now(timezone.utc),
+            max_age_minutes=settings.signal_scan_max_age_minutes,
+            min_close_minutes=body.min_minutes_to_close or settings.signal_min_close_lead_minutes,
+            max_spread=settings.signal_max_spread,
+            cursor=body.cursor,
+        )
+        return {
+            "request_id": request.state.request_id, "service": SIGNAL_SERVICE,
+            "status": "ok" if ranked["signals"] else "no_signal",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+            **ranked,
+        }
+
+    @app.post(
+        "/v1/signals", response_model=SignalResponse,
+        responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+        tags=["services"], summary="Best Signals — ranked natural-language opportunities",
+        operation_id="rwoo_best_signals",
+    )
+    async def best_signals(request: Request, body: SignalRequest):
+        return await _best_signals(request, body)
+
+    @app.get("/v1/signals", response_model=SignalResponse, tags=["services"],
+             summary="Best Signals (GET form for x402 discovery clients)",
+             operation_id="rwoo_best_signals_get")
+    async def best_signals_get(request: Request, message: str = "Give me the best signals now",
+                               limit: int = 5, min_minutes_to_close: int | None = None,
+                               cursor: str | None = None):
+        body = SignalRequest(message=message, limit=limit, min_minutes_to_close=min_minutes_to_close,
+                             cursor=cursor)
+        return await _best_signals(request, body)
+
+    # Compatibility for agent clients that POST their text envelope to the
+    # advertised base resource. It delegates to exactly the same service.
+    @app.post("/", response_model=SignalResponse, include_in_schema=False)
+    async def root_agent_request(request: Request, body: SignalRequest):
+        return await _best_signals(request, body)
+
     @app.post(
         "/v1/check-market",
         response_model=CheckMarketResponse,
         responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
         tags=["services"],
         summary="Price and compare one supported market",
+        operation_id="rwoo_check_market",
     )
     async def check_market(request: Request, body: CheckMarketRequest):
         rid = request.state.request_id
@@ -275,6 +442,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         responses={402: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
         tags=["services"],
         summary="Compare two candidate-equivalent contracts across venues",
+        operation_id="rwoo_cross_venue_edge",
     )
     async def cross_venue(request: Request, body: CrossVenueRequest):
         rid = request.state.request_id
@@ -311,9 +479,13 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         return services.build_calibration(report=report, family=family, probability_band=probability_band)
 
     @app.get("/v1/calibration/{family}/{model_version}", tags=["calibration"])
-    async def calibration_family_model(family: str, model_version: str, request: Request):
+    async def calibration_family_model(family: str, model_version: str, request: Request,
+                                       probability_band: str | None = None):
         report = services.load_json_artifact(settings.calibration_report_path)
-        return services.build_calibration(report=report, family=family, model_version_filter=model_version)
+        return services.build_calibration(
+            report=report, family=family, model_version_filter=model_version,
+            probability_band=probability_band,
+        )
 
     # ------------------------- supporting endpoints -------------------------
     @app.get("/healthz", tags=["ops"], summary="Cheap liveness check")
@@ -341,16 +513,25 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     async def service_metadata(request: Request):
         config: PaymentConfig = request.app.state.payment_config
 
-        def svc(identifier, endpoint, description, paid):
+        def svc(identifier, endpoint, description, payment_capable):
+            price = config.price_for(identifier)
+            paid = bool(payment_capable and config.enabled and price is not None)
             return {
                 "identifier": identifier,
                 "underscore_identifier": identifier.replace(".", "_"),
+                "command": identifier.replace(".", "_"),
+                "display_name": {
+                    "rwoo.best_signals": "Best Signals",
+                    "rwoo.check_market": "Check Market",
+                    "rwoo.cross_venue_edge": "Cross-Venue Edge",
+                    "rwoo.get_calibration": "Get Calibration",
+                }.get(identifier, identifier),
                 "endpoint": f"{settings.api_base_url.rstrip('/')}{endpoint}",
                 "description": description,
                 "paid": paid,
                 # Price is only populated once an operator sets it via env; it is
                 # never hardcoded.
-                "price_atomic": config.price_for(identifier) if paid else None,
+                "price_atomic": price if paid else None,
             }
 
         ready, missing = config.settlement_readiness()
@@ -364,18 +545,22 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             "execution_enabled": False,
             "payment": {
                 "protocol": "OKX Agent Payments (x402)",
-                "x402_version": payment_mod.X402_VERSION,
+                "x402_version": 2,
                 "enabled": config.enabled,
                 "mode": config.mode,
                 "scheme": config.scheme,
                 "network": config.network,
                 "asset": config.asset,
+                "asset_name": config.asset_name,
+                "asset_version": config.asset_version,
                 "asset_decimals": config.asset_decimals,
                 "recipient": config.recipient,
                 "settlement_ready": ready,
                 "pending_operator_config": missing,
             },
             "services": [
+                svc("rwoo.best_signals", "/v1/signals",
+                    _SERVICE_DESCRIPTION["rwoo.best_signals"], True),
                 svc("rwoo.check_market", "/v1/check-market",
                     _SERVICE_DESCRIPTION["rwoo.check_market"], True),
                 svc("rwoo.cross_venue_edge", "/v1/cross-venue-edge",
@@ -387,16 +572,24 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.get("/v1/supported-markets", tags=["ops"], summary="Coverage: venues, families, series")
     async def supported_markets():
+        scan = services.load_json_artifact(settings.opportunity_scan_path)
         return {
             "venues": list(SUPPORTED_VENUES),
+            "registered_model_families": sorted(MODEL_VERSIONS.keys()),
             "families": sorted(MODEL_VERSIONS.keys()),
             "model_versions": MODEL_VERSIONS,
+            "sports_families_currently_producing_candidates": ["sports.world_cup"],
+            "sports_coverage": SPORTS_COVERAGE,
+            "current_sports_scan": sports_scan_summary(scan),
+            "expanded_market_coverage": EXPANSION_COVERAGE,
+            "current_expansion_scan": expansion_scan_summary(scan),
             "kalshi_series": {
                 "weather": WEATHER_SERIES,
                 "economics": ECONOMICS_SERIES,
                 "sports": SPORTS_SERIES,
+                "expansion": (scan or {}).get("dynamically_discovered_expansion_series", []),
             },
-            "note": "Unsupported or unbindable markets fail closed with a stable refusal, never a silent zero.",
+            "note": "Registered model families are not a promise of a current signal. Expansion series are discovered from venue settlement metadata on every scan; unsupported or unbindable markets fail closed, never to a silent zero.",
         }
 
     @app.get("/v1/evidence/status", tags=["ops"], summary="Evidence ledger + calibration status")
@@ -484,6 +677,7 @@ def _install_custom_openapi(app: FastAPI, settings: Settings) -> None:
 
     def custom_openapi():
         if app.openapi_schema:
+            app.openapi_schema["servers"] = [{"url": settings.api_base_url}]
             return app.openapi_schema
         schema = get_openapi(
             title=app.title,

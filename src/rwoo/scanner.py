@@ -16,12 +16,13 @@ from typing import Any
 
 from rwoo import edge, weather_stations
 from rwoo.coverage import classify_market_shape
-from rwoo.engines import economics, sports, weather
-from rwoo.parsers import parse_economics_market, parse_sports_market, parse_weather_market
+from rwoo.engines import economics, energy, hurricane, sports, weather
+from rwoo.parsers import parse_commodity_market, parse_economics_market, parse_sports_market, parse_weather_market
 from rwoo.explanations import build_why_trace
 from rwoo.cross_venue import find_cross_venue_edges
 from rwoo.identity import event_identity, model_version
-from rwoo.readers import kalshi, limitless, polymarket
+from rwoo.readers import kalshi, limitless, noaa_hurricane, polymarket
+from rwoo import economic_sources
 
 # Every weather series with a verified station is swept completely; the
 # registry in weather_stations.py is the single source of truth.
@@ -33,6 +34,19 @@ SPORTS_SERIES = ["KXWCSTAGEOFELIM"]
 KALSHI_ACTIVE_DEFAULT_LIMIT = 2000
 POLYMARKET_DEFAULT_LIMIT = 2000
 LIMITLESS_DEFAULT_LIMIT = 1000
+_SCAN_SOURCE_CACHE: dict[str, Any] = {}
+EXPANSION_FAMILIES = (
+    "weather.hurricane_season",
+    "energy.henry_hub_spot",
+    "energy.commodity_price",
+    "agriculture.commodity_price",
+)
+
+
+def _scan_source(key: str, loader):
+    if key not in _SCAN_SOURCE_CACHE:
+        _SCAN_SOURCE_CACHE[key] = loader()
+    return _SCAN_SOURCE_CACHE[key]
 
 
 @dataclass
@@ -68,6 +82,9 @@ class ScanRecord:
     venue_resolution_id: str
     resolution_time: str | None
     fetched_at: str
+    trading_close_time: str | None = None
+    market_status: str | None = None
+    source_timestamp: str | None = None
 
 
 def _bump_counter(counter: dict[str, int], key: str) -> None:
@@ -139,6 +156,9 @@ def _record_from_result(market, engine_result: dict, qualified_edge: dict) -> Sc
         venue_resolution_id=_venue_resolution_id(market),
         resolution_time=market.resolution_time,
         fetched_at=market.fetched_at,
+        trading_close_time=market.trading_close_time,
+        market_status=market.market_status,
+        source_timestamp=engine_result.get("data_freshness"),
     )
 
 
@@ -195,6 +215,9 @@ def _unsupported_record(market, reason: str) -> ScanRecord:
         venue_resolution_id=_venue_resolution_id(market),
         resolution_time=market.resolution_time,
         fetched_at=market.fetched_at,
+        trading_close_time=market.trading_close_time,
+        market_status=market.market_status,
+        source_timestamp=None,
     )
 
 
@@ -213,23 +236,30 @@ def evaluate_market(market) -> ScanRecord | None:
 
     if market.domain == "weather":
         parsed = parse_weather_market(market)
-        if parsed.status != "engine_available" or parsed.metric not in weather.METRICS:
+        if parsed.status == "engine_available" and parsed.family == "weather.hurricane_season":
+            engine_result = hurricane.compute_atlantic_season_count_probability(
+                parsed.metric or "", parsed.strike_type or "", parsed.floor_strike,
+                target_year=parsed.target_year,
+                outlook=_scan_source("noaa_atlantic_outlook", noaa_hurricane.fetch_atlantic_outlook),
+            )
+        elif parsed.status != "engine_available" or parsed.metric not in weather.METRICS:
             return None
-        lat = parsed.raw.get("lat")
-        lon = parsed.raw.get("lon")
-        if lat is None or lon is None or not parsed.target_date or not parsed.strike_type:
-            return None
-        engine_result = weather.compute_weather_probability(
-            lat=lat,
-            lon=lon,
-            target_date=parsed.target_date,
-            timezone_name=parsed.timezone_name or "UTC",
-            strike_type=parsed.strike_type,
-            floor_strike=parsed.floor_strike,
-            cap_strike=parsed.cap_strike,
-            include_base_rate=False,
-            metric=parsed.metric,
-        )
+        else:
+            lat = parsed.raw.get("lat")
+            lon = parsed.raw.get("lon")
+            if lat is None or lon is None or not parsed.target_date or not parsed.strike_type:
+                return None
+            engine_result = weather.compute_weather_probability(
+                lat=lat,
+                lon=lon,
+                target_date=parsed.target_date,
+                timezone_name=parsed.timezone_name or "UTC",
+                strike_type=parsed.strike_type,
+                floor_strike=parsed.floor_strike,
+                cap_strike=parsed.cap_strike,
+                include_base_rate=False,
+                metric=parsed.metric,
+            )
     elif market.domain == "economics":
         event_ticker = raw_market.get("event_ticker", "")
         if market.venue == "kalshi" and event_ticker.startswith("KXCPICORE-") and raw_market.get("strike_type"):
@@ -269,10 +299,24 @@ def evaluate_market(market) -> ScanRecord | None:
             engine_result = sports.compute_mlb_match_probability(parsed.location, parsed.source_series)
         elif parsed is not None and parsed.status == "engine_available" and parsed.shape == "match_winner" and parsed.location and parsed.source_series and parsed.family == "sports.club_soccer":
             engine_result = sports.compute_club_soccer_match_probability(parsed.location, parsed.source_series)
+        elif parsed is not None and parsed.status == "engine_available" and parsed.shape == "match_winner" and parsed.location and parsed.source_series and parsed.family == "sports.nba":
+            engine_result = sports.compute_nba_match_probability(parsed.location, parsed.source_series)
         elif market.venue == "polymarket" and market.question.endswith("win the 2026 FIFA World Cup?"):
             engine_result = sports.compute_world_cup_probability(market.question)
         elif market.venue == "limitless" and market.raw.get("limitless_supported_shape") == "world_cup_winner":
             engine_result = sports.compute_world_cup_probability(market.question)
+        else:
+            return None
+    elif market.domain == "commodities":
+        parsed = parse_commodity_market(market)
+        if parsed is None or parsed.status != "engine_available":
+            return None
+        if parsed.family == "energy.henry_hub_spot" and parsed.target_date:
+            engine_result = energy.compute_henry_hub_annual_high_probability(
+                parsed.strike_type or "", parsed.floor_strike, parsed.target_date,
+                target_year=parsed.target_year,
+                series=_scan_source("eia_dhhngsp", lambda: economic_sources.fetch_fred_series("DHHNGSP")),
+            )
         else:
             return None
     else:
@@ -348,7 +392,7 @@ def _economics_engine_result(parsed) -> dict | None:
 def skip_reason(market) -> str:
     coverage = classify_market_shape(market)
     if market.venue == "limitless":
-        if market.domain in {"weather", "economics", "sports"}:
+        if market.domain in {"weather", "economics", "sports", "commodities"}:
             return f"limitless_{coverage.family}_{coverage.shape}_{coverage.status}"
         return "limitless_other_domain_or_price_oracle_not_supported"
     if market.venue == "polymarket" and market.domain == "sports":
@@ -361,7 +405,65 @@ def skip_reason(market) -> str:
 
 
 def _should_include_unsupported(market) -> bool:
-    return market.domain in {"weather", "economics", "sports"}
+    return market.domain in {"weather", "economics", "sports", "commodities"}
+
+
+def _expansion_series(series_rows: list[dict]) -> list[str]:
+    """Select only source-bound series whose shapes have an implemented path."""
+    selected = []
+    for row in series_rows:
+        title = str(row.get("title") or "").lower()
+        sources = " ".join(str(item.get("name") or "") for item in (row.get("settlement_sources") or [])).lower()
+        ticker = str(row.get("ticker") or "")
+        if "energy information administration" in sources and "natural gas" in title:
+            selected.append(ticker)
+        elif title in {"number of hurricanes", "number of tropical storms", "number of major hurricanes"} and "oceanic and atmospheric administration" in sources:
+            selected.append(ticker)
+        elif "usda" in sources:
+            selected.append(ticker)  # telemetry even when no engine/open market exists
+    return sorted(set(selected))
+
+
+def _unsupported_theme(market) -> str:
+    text = f"{market.question} {market.resolution_rule}".lower()
+    themes = (
+        ("crypto_price", ("bitcoin", "ethereum", "solana", "crypto")),
+        ("politics_elections", ("election", "president", "congress", "trump")),
+        ("company_financial", ("stock price", "earnings", "market cap", "ipo")),
+        ("entertainment", ("movie", "album", "stream", "box office", "award")),
+        ("transportation", ("flight", "airline", "airport", "train")),
+        ("public_health", ("cases", "hospital", "disease", "flu", "covid")),
+    )
+    return next((name for name, words in themes if any(word in text for word in words)), market.domain)
+
+
+def _telemetry_rows(markets: list) -> list[dict[str, Any]]:
+    buckets: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    for market in markets:
+        coverage = classify_market_shape(market)
+        if coverage.status in {"engine_available", "actionable", "wait"}:
+            continue
+        key = (market.venue, market.domain, coverage.family, _unsupported_theme(market))
+        row = buckets.setdefault(key, {
+            "venue": market.venue, "domain": market.domain, "family": coverage.family,
+            "theme": key[-1], "count": 0, "total_volume": 0.0, "sample_questions": [],
+            "missing_statuses": {},
+        })
+        row["count"] += 1
+        raw_market = market.raw.get("market", {}) if isinstance(market.raw, dict) else {}
+        raw_volume = (
+            raw_market.get("volume_fp") or market.raw.get("volumeNum")
+            if isinstance(market.raw, dict) else 0
+        )
+        try:
+            row["total_volume"] += float(raw_volume or 0)
+        except (TypeError, ValueError):
+            pass
+        if market.question and market.question not in row["sample_questions"] and len(row["sample_questions"]) < 3:
+            row["sample_questions"].append(market.question)
+        statuses = row["missing_statuses"]
+        statuses[coverage.status] = statuses.get(coverage.status, 0) + 1
+    return sorted(buckets.values(), key=lambda row: (row["count"], row["total_volume"]), reverse=True)
 
 
 def _score_record(record: ScanRecord) -> tuple[int, float, float]:
@@ -393,6 +495,29 @@ def scan_opportunities(
     limitless_limit: int = LIMITLESS_DEFAULT_LIMIT,
     include_limitless: bool = True,
 ) -> dict[str, Any]:
+    with economic_sources.source_cache_scope():
+        return _scan_opportunities_impl(
+            max_weather_markets_per_series=max_weather_markets_per_series,
+            max_economics_markets=max_economics_markets,
+            kalshi_active_limit=kalshi_active_limit,
+            polymarket_limit=polymarket_limit,
+            limitless_limit=limitless_limit,
+            include_limitless=include_limitless,
+        )
+
+
+def _scan_opportunities_impl(
+    *,
+    max_weather_markets_per_series: int = 20,
+    max_economics_markets: int = 40,
+    kalshi_active_limit: int = KALSHI_ACTIVE_DEFAULT_LIMIT,
+    polymarket_limit: int = POLYMARKET_DEFAULT_LIMIT,
+    limitless_limit: int = LIMITLESS_DEFAULT_LIMIT,
+    include_limitless: bool = True,
+) -> dict[str, Any]:
+    # A scan is one coherent source snapshot. Reuse within it, but never carry
+    # observations into the next scheduled run.
+    _SCAN_SOURCE_CACHE.clear()
     started_at = datetime.now(timezone.utc).isoformat()
     markets = []
 
@@ -406,10 +531,14 @@ def scan_opportunities(
     markets.extend(
         kalshi.fetch_canonical_markets_for_series_batch(SPORTS_SERIES, limit=max_economics_markets)
     )
+    discovered_rows = kalshi.fetch_series("Commodities") + kalshi.fetch_series("Climate and Weather")
+    expansion_series = _expansion_series(discovered_rows)
+    markets.extend(kalshi.fetch_canonical_markets_for_series_batch(expansion_series, limit=max_economics_markets))
     markets.extend(polymarket.fetch_canonical_active_markets(max_markets=polymarket_limit))
     if include_limitless:
         markets.extend(limitless.fetch_canonical_markets(active_limit=limitless_limit))
     markets = _dedupe_markets(markets)
+    unsupported_telemetry = _telemetry_rows(markets)
     cross_venue = find_cross_venue_edges(markets)
 
     evaluated_records = []
@@ -468,9 +597,14 @@ def scan_opportunities(
         "venue_counts": venue_counts,
         "domain_counts": domain_counts,
         "family_counts": family_counts,
+        "expansion_family_counts": {
+            family: family_counts.get(family, 0) for family in EXPANSION_FAMILIES
+        },
         "coverage_status_counts": coverage_status_counts,
         "skip_reasons": skip_reasons,
         "included_unsupported_reasons": included_unsupported_reasons,
+        "unsupported_market_telemetry": unsupported_telemetry,
+        "dynamically_discovered_expansion_series": expansion_series,
         "limitless_group_children_seen": limitless_group_children_seen,
         "errors": errors,
         "actionable_count": len(actionable),

@@ -78,6 +78,13 @@ def _calibration_context(report: dict[str, Any] | None, family: str, oracle_prob
             "promotion_eligible": False,
             "criteria": {},
         }
+    if promotion.get("model_version") != model_ver:
+        exact = (((report.get("model_evidence") or {}).get(family) or {}).get(model_ver) or {})
+        return {
+            "status": "accumulating", "scope": scope,
+            "independent_resolved_events": int(exact.get("independent_event_groups") or 0),
+            "next_checkpoint": 30, "promotion_eligible": False, "criteria": {},
+        }
     events = int(promotion.get("independent_event_groups") or 0)
     eligible = bool(promotion.get("eligible"))
     return {
@@ -427,25 +434,71 @@ def build_calibration(
             "families": {},
         }
     promotion = report.get("promotion_readiness") or {}
+    all_model_evidence = report.get("model_evidence") or {}
+    retrospective = report.get("retrospective_validation") or {}
     if family is not None:
         promotion = {family: promotion[family]} if family in promotion else {}
     families: dict[str, Any] = {}
-    for fam, row in promotion.items():
-        if model_version_filter and model_version(fam) != model_version_filter:
-            continue
-        families[fam] = row
+    scoped_model_evidence: dict[str, Any] = {}
+    if model_version_filter:
+        candidate_families = [family] if family is not None else sorted(all_model_evidence)
+        for fam in candidate_families:
+            row = (all_model_evidence.get(fam) or {}).get(model_version_filter)
+            if row is None:
+                continue
+            scoped_row = dict(row)
+            if probability_band:
+                band_calibration = (row.get("calibration_by_probability_band") or {}).get(probability_band)
+                band_gate = next((item for item in
+                                  (row.get("probability_band_gate") or {}).get("bands", [])
+                                  if item.get("bucket") == probability_band), None)
+                precommitted = int((row.get("precommitted_by_probability_band") or {}).get(probability_band, 0))
+                resolved = int((band_calibration or {}).get("count") or 0)
+                scoped_row.update({
+                    "precommitted_contract_rows": precommitted,
+                    "resolved_contract_rows": resolved,
+                    "unresolved_contract_rows": max(0, precommitted - resolved),
+                    "independent_event_groups": int((band_gate or {}).get("independent_event_groups") or 0),
+                    "calibration": band_calibration,
+                    "selected_probability_band": probability_band,
+                })
+            scoped_model_evidence.setdefault(fam, {})[model_version_filter] = scoped_row
+            families[fam] = scoped_row
+            current = promotion.get(fam) or {}
+            if current.get("model_version") == model_version_filter:
+                families[fam] = {**scoped_row, "promotion_readiness": current}
+    else:
+        families = dict(promotion)
+        scoped_model_evidence = {
+            fam: versions for fam, versions in all_model_evidence.items()
+            if family is None or fam == family
+        }
+    scoped_retro = {
+        fam: row for fam, row in retrospective.items()
+        if (family is None or fam == family) and
+        (model_version_filter is None or model_version_filter in {
+            row.get("target_model_version"), row.get("source_model_version")
+        })
+    }
+    selected_rows = [row for versions in scoped_model_evidence.values() for row in versions.values()]
+    scoped_precommitted = sum(int(row.get("precommitted_contract_rows") or 0) for row in selected_rows)
+    scoped_resolved = sum(int(row.get("resolved_contract_rows") or 0) for row in selected_rows)
+    scoped_groups = sum(int(row.get("independent_event_groups") or 0) for row in selected_rows)
+    exact_calibration = selected_rows[0].get("calibration") if len(selected_rows) == 1 else None
     return {
         "service": CALIBRATION_SERVICE,
         "status": "ok",
         "created_at": created_at,
         "report_available": True,
         "report_created_at": report.get("created_at"),
-        "precommitted_forecasts": report.get("precommitted_forecasts", 0),
-        "resolved_forecasts": report.get("resolved_forecasts", 0),
-        "unresolved_forecasts": report.get("unresolved_forecasts", 0),
-        "independent_resolved_event_groups": report.get("independent_resolved_event_groups", 0),
-        "calibration": report.get("calibration"),
+        "precommitted_forecasts": scoped_precommitted if model_version_filter else report.get("precommitted_forecasts", 0),
+        "resolved_forecasts": scoped_resolved if model_version_filter else report.get("resolved_forecasts", 0),
+        "unresolved_forecasts": (scoped_precommitted - scoped_resolved) if model_version_filter else report.get("unresolved_forecasts", 0),
+        "independent_resolved_event_groups": scoped_groups if model_version_filter else report.get("independent_resolved_event_groups", 0),
+        "calibration": exact_calibration if model_version_filter else report.get("calibration"),
         "families": families,
+        "model_evidence": scoped_model_evidence,
+        "retrospective_validation": scoped_retro,
         "ledger_verification": report.get("ledger_verification"),
         "selection_policy": report.get("selection_policy"),
         "filters": {

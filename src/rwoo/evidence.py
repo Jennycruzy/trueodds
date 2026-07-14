@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -10,9 +11,11 @@ from typing import Any
 import httpx
 
 from rwoo.calibration import (
-    CalibrationRecord, calibration_breakdown, fit_power_recalibration,
-    grouped_walk_forward, probability_bucket,
+    WEATHER_V3_CALIBRATION_GAMMA, WEATHER_V3_SOURCE_MODEL, CalibrationRecord,
+    calibration_breakdown, fit_power_recalibration, grouped_walk_forward,
+    power_transform, probability_bucket,
 )
+from rwoo.identity import MODEL_VERSIONS
 from rwoo.receipts import AppendOnlyLedger, hash_hex
 from rwoo.scanner import scan_opportunities
 from rwoo.official_outcomes import event_happened, resolve_weather_from_noaa
@@ -23,7 +26,7 @@ DEFAULT_REPORT_MD = Path("data/public/calibration_report_latest.md")
 KALSHI_MARKET_URL = "https://api.elections.kalshi.com/trade-api/v2/markets/{market_id}"
 POLYMARKET_URL = "https://gamma-api.polymarket.com/markets/{market_id}"
 LIMITLESS_URL = "https://api.limitless.exchange/markets/{market_id}"
-WEATHER_PRODUCTION_MODEL = "weather-ensemble-v3-power-calibrated"
+WEATHER_PRODUCTION_MODEL = MODEL_VERSIONS["weather.temperature"]
 CHECKPOINTS = (30, 100, 250, 500)
 MIN_BAND_GROUPS = 30
 MIN_DRIFT_GROUPS = 20
@@ -43,6 +46,62 @@ def _float_or_none(value: Any) -> float | None:
         return number if 0 <= number <= 1 else None
     except (TypeError, ValueError):
         return None
+
+
+def _resolution_due(payload: dict[str, Any], now: datetime | None = None) -> bool:
+    """Avoid polling a venue before its declared resolution time.
+
+    Legacy rows or malformed timestamps are still queried so a bad historical
+    value cannot strand an otherwise resolvable forecast forever.
+    """
+    raw = payload.get("resolution_time")
+    if not raw:
+        return True
+    try:
+        due = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+        if due.tzinfo is None:
+            due = due.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return True
+    return due <= (now or datetime.now(timezone.utc))
+
+
+def _prospective_eligible(record: dict[str, Any]) -> tuple[bool, str | None]:
+    """Reject forecasts created after the underlying event can be known."""
+    if record.get("family") not in {"weather.temperature", "weather.precipitation"}:
+        return True, None
+    identity = record.get("event_identity") or {}
+    target = identity.get("target_date")
+    created = record.get("fetched_at")
+    try:
+        if datetime.fromisoformat(str(created).replace("Z", "+00:00")).date() > datetime.fromisoformat(str(target)[:10]).date():
+            return False, "daily weather target date had elapsed before forecast creation"
+    except (TypeError, ValueError):
+        return False, "daily weather forecast lacks a valid target or creation date"
+    return True, None
+
+
+def _quote_before_cutoff(quote: dict[str, Any], forecast: dict[str, Any] | None) -> bool:
+    observed = quote.get("observed_at")
+    cutoffs = [quote.get("trading_close_time")]
+    if forecast:
+        cutoffs.append(forecast.get("resolution_time"))
+    try:
+        observed_at = datetime.fromisoformat(str(observed).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return False
+    for raw in cutoffs:
+        if not raw:
+            continue
+        try:
+            cutoff = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+            if cutoff.tzinfo is None:
+                cutoff = cutoff.replace(tzinfo=timezone.utc)
+        except (TypeError, ValueError):
+            continue
+        if observed_at > cutoff:
+            return False
+    return True
 
 
 def _closing_probability(venue: str, market: dict[str, Any]) -> tuple[float | None, str | None]:
@@ -182,9 +241,13 @@ class EvidenceStore:
             row.payload["quote_key"] for row in self._records("market_quote_snapshot")
             if "quote_key" in row.payload
         }
-        appended = skipped = quotes_appended = 0
+        appended = skipped = quotes_appended = prospective_ineligible_skipped = 0
         for record in scan["top"]:
             if record.get("oracle_prob") is None:
+                continue
+            eligible, _reason = _prospective_eligible(record)
+            if not eligible:
+                prospective_ineligible_skipped += 1
                 continue
             forecast_at = record["fetched_at"]
             snapshot_key = ":".join(
@@ -198,6 +261,8 @@ class EvidenceStore:
                     "market_id": record["market_id"], "model_version": record["model_version"],
                     "observed_at": forecast_at, "market_implied_prob": record["implied_prob"],
                     "spread": record["spread"], "execution": record.get("execution"),
+                    "trading_close_time": record.get("trading_close_time"),
+                    "event_target_date": (record.get("event_identity") or {}).get("target_date"),
                 })
                 existing_quotes.add(quote_key)
                 quotes_appended += 1
@@ -236,16 +301,19 @@ class EvidenceStore:
             existing.add(snapshot_key)
             appended += 1
         return {"appended": appended, "duplicates_skipped": skipped,
+                "prospective_ineligible_skipped": prospective_ineligible_skipped,
                 "quote_snapshots_appended": quotes_appended, "ledger": self.ledger.verify()}
 
     def resolve_pending(self, client: httpx.Client | None = None) -> dict[str, Any]:
         own_client = client is None
         client = client or httpx.Client(timeout=20)
         precommits = self._records("forecast_precommit")
+        forecasts_by_key = {row.payload.get("snapshot_key"): row.payload for row in precommits}
         quote_snapshots: dict[str, dict[str, Any]] = {}
         for quote in self._records("market_quote_snapshot"):
             key = quote.payload.get("forecast_snapshot_key")
-            if key and (key not in quote_snapshots or quote.payload.get("observed_at", "") > quote_snapshots[key].get("observed_at", "")):
+            if (key and _quote_before_cutoff(quote.payload, forecasts_by_key.get(key))
+                    and (key not in quote_snapshots or quote.payload.get("observed_at", "") > quote_snapshots[key].get("observed_at", ""))):
                 quote_snapshots[key] = quote.payload
         resolved_keys = {row.payload["snapshot_key"] for row in self._records("forecast_resolution")}
         resolved = pending = unsupported = errors = 0
@@ -255,6 +323,9 @@ class EvidenceStore:
                 payload = row.payload
                 key = payload["snapshot_key"]
                 if key in resolved_keys:
+                    continue
+                if not _resolution_due(payload):
+                    pending += 1
                     continue
                 try:
                     venue = payload["venue"]
@@ -462,9 +533,114 @@ class EvidenceStore:
                 group = row["forecast"]["event_group_id"]
                 family_checks = weather_concordance.setdefault(family, {})
                 family_checks[group] = family_checks.get(group, True) and bool(concordant)
+
+        # Prospective evidence is always broken out by the exact model version
+        # that produced the precommit. This is the source used by versioned API
+        # routes; aggregate contract rows must never masquerade as current-model
+        # proof.
+        model_evidence: dict[str, dict[str, Any]] = {}
+        precommit_counts: dict[tuple[str, str], int] = {}
+        precommit_band_counts: dict[tuple[str, str], dict[str, int]] = {}
+        for forecast in precommits.values():
+            key = (str(forecast.get("family") or "unknown"),
+                   str(forecast.get("model_version") or "unknown"))
+            precommit_counts[key] = precommit_counts.get(key, 0) + 1
+            try:
+                band = probability_bucket(float(forecast["oracle_prob"]), .1)
+                bands = precommit_band_counts.setdefault(key, {})
+                bands[band] = bands.get(band, 0) + 1
+            except (KeyError, TypeError, ValueError):
+                pass
+        grouped_pairs: dict[tuple[str, str], list[tuple[CalibrationRecord, dict[str, Any]]]] = {}
+        for record, row in zip(scored, scored_payloads):
+            forecast = row["forecast"]
+            key = (str(forecast.get("family") or "unknown"),
+                   str(forecast.get("model_version") or "unknown"))
+            grouped_pairs.setdefault(key, []).append((record, row))
+        for key in sorted(set(precommit_counts) | set(grouped_pairs)):
+            family, version = key
+            pairs = grouped_pairs.get(key, [])
+            records = [pair[0] for pair in pairs]
+            rows = [pair[1] for pair in pairs]
+            checks: dict[str, bool] = {}
+            for row in rows:
+                forecast = row["forecast"]
+                verification = verifications.get(forecast["snapshot_key"])
+                concordant = (verification.get("concordant") if verification
+                              else row["resolution"].get("official_source_concordant"))
+                if concordant is not None:
+                    group = forecast["event_group_id"]
+                    checks[group] = checks.get(group, True) and bool(concordant)
+            resolved_rows = len(rows)
+            precommitted_rows = precommit_counts.get(key, 0)
+            breakdown = calibration_breakdown(records, width=.1) if records else None
+            model_evidence.setdefault(family, {})[version] = {
+                "evidence_type": "prospective_exact_model_version",
+                "model_version": version,
+                "precommitted_contract_rows": precommitted_rows,
+                "resolved_contract_rows": resolved_rows,
+                "unresolved_contract_rows": max(0, precommitted_rows - resolved_rows),
+                "precommitted_by_probability_band": precommit_band_counts.get(key, {}),
+                "independent_event_groups": len({
+                    row["forecast"]["event_group_id"] for row in rows
+                }),
+                "calibration": breakdown["overall"] if breakdown else None,
+                "calibration_by_probability_band": breakdown["by_probability_band"] if breakdown else {},
+                "official_source_checks": len(checks),
+                "official_source_concordance_rate": (
+                    sum(checks.values()) / len(checks) if checks else None
+                ),
+                "probability_band_gate": _band_gate(records),
+                "market_and_paper_performance": _market_performance(rows),
+                "drift_monitoring": _segment_drift(rows) if family == "weather.temperature" else None,
+            }
+
+        # Weather v3's fixed transform was selected from v2 evidence. Publish
+        # that development evidence, but label it retrospective and never add
+        # its groups to v3's prospective promotion count.
+        retrospective_validation: dict[str, Any] = {}
+        source_pairs = grouped_pairs.get(("weather.temperature", WEATHER_V3_SOURCE_MODEL), [])
+        if source_pairs:
+            source_records = [pair[0] for pair in source_pairs]
+            transformed_records = [replace(
+                record,
+                oracle_prob=power_transform(record.oracle_prob, WEATHER_V3_CALIBRATION_GAMMA),
+                bucket=probability_bucket(
+                    power_transform(record.oracle_prob, WEATHER_V3_CALIBRATION_GAMMA), .1
+                ),
+            ) for record in source_records]
+            original = calibration_breakdown(source_records, width=.1)["overall"]
+            transformed = calibration_breakdown(transformed_records, width=.1)["overall"]
+            walk_forward = grouped_walk_forward(source_records)
+            market_rows = [pair[1] for pair in source_pairs
+                           if _float_or_none(pair[1]["forecast"].get("market_implied_prob")) is not None]
+            market_brier = (sum(
+                (row["forecast"]["market_implied_prob"] - row["resolution"]["outcome"]) ** 2
+                for row in market_rows
+            ) / len(market_rows)) if market_rows else None
+            target_model = WEATHER_PRODUCTION_MODEL
+            retrospective_validation["weather.temperature"] = {
+                "evidence_type": "retrospective_model_development",
+                "target_model_version": target_model,
+                "source_model_version": WEATHER_V3_SOURCE_MODEL,
+                "method": "power_transform",
+                "gamma": WEATHER_V3_CALIBRATION_GAMMA,
+                "independent_event_groups": len({r.source_run for r in source_records}),
+                "contract_rows": len(source_records),
+                "original_calibration": original,
+                "transformed_calibration": transformed,
+                "market_brier": market_brier,
+                "transformed_oracle_brier_advantage": (
+                    market_brier - transformed["brier_score"] if market_brier is not None else None
+                ),
+                "grouped_walk_forward": {k: v for k, v in walk_forward.items() if k != "folds"},
+                "counts_toward_prospective_promotion": False,
+                "paper_strategy_recomputed_for_target_model": False,
+                "note": "supports the calibration design but does not replace prospective exact-version resolutions",
+            }
         promotion = {}
         for family in sorted(set(family_rows) | {"weather.temperature"}):
-            target_model = WEATHER_PRODUCTION_MODEL if family == "weather.temperature" else None
+            target_model = MODEL_VERSIONS.get(family)
             selected_pairs = [(record, row) for record, row in zip(scored, scored_payloads)
                               if row["forecast"]["family"] == family and
                               (target_model is None or row["forecast"].get("model_version") == target_model)]
@@ -513,7 +689,7 @@ class EvidenceStore:
                     "market_and_paper_performance": _market_performance(checkpoint_rows),
                 })
             promotion[family] = {
-                "model_version": target_model or "all_currently-recorded-models",
+                "model_version": target_model or "unversioned-family",
                 "independent_event_groups": groups,
                 "resolved_contract_rows": len(selected_rows),
                 "minimum_groups_for_experimental_micro_execution": 30,
@@ -572,6 +748,8 @@ class EvidenceStore:
             "unresolved_forecasts": len(precommits) - len(resolutions),
             "calibration": calibration_breakdown(scored, width=.1) if scored else None,
             "weather_recalibration": weather_recalibration,
+            "model_evidence": model_evidence,
+            "retrospective_validation": retrospective_validation,
             "promotion_readiness": promotion,
             "ledger_verification": self.ledger.verify(),
             "selection_policy": "all priced scan records are precommitted; losses and non-actionable forecasts are retained",

@@ -67,6 +67,48 @@ forecasts are kept. Confidence is earned only through independent, resolved even
 <div class="note empty"><p class="small">No forecasts have resolved yet, so no reliability curve can be computed. Counts above are real; the curve stays empty rather than showing zeros.</p></div>
 {% endif %}
 
+{% if report.model_evidence %}
+<h2>Prospective evidence by exact model version</h2>
+<p class="small muted">Only rows produced under the exact deployed version can unlock that version's execution interlock.</p>
+<div class="table-scroll">
+  <table>
+    <thead><tr>
+      <th scope="col">Family</th><th scope="col">Model version</th>
+      <th scope="col" class="num">Precommitted</th><th scope="col" class="num">Resolved rows</th>
+      <th scope="col" class="num">Independent events</th><th scope="col" class="num">Brier</th>
+    </tr></thead>
+    <tbody>
+    {% for family, versions in report.model_evidence.items() %}
+      {% for version, row in versions.items() %}
+      <tr>
+        <td>{{ family }}</td><td><code>{{ version }}</code></td>
+        <td class="num">{{ row.precommitted_contract_rows }}</td>
+        <td class="num">{{ row.resolved_contract_rows }}</td>
+        <td class="num">{{ row.independent_event_groups }}</td>
+        <td class="num">{% if row.calibration %}{{ row.calibration.brier_score|round(4) }}{% else %}<span class="muted">—</span>{% endif %}</td>
+      </tr>
+      {% endfor %}
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endif %}
+
+{% if report.retrospective_validation %}
+<h2>Retrospective model-development validation</h2>
+{% for family, row in report.retrospective_validation.items() %}
+<div class="note">
+  <p><strong>{{ family }}:</strong> <code>{{ row.target_model_version }}</code> was tested by applying its
+  {{ row.method }} (gamma {{ row.gamma }}) to {{ row.independent_event_groups }} independent events from
+  <code>{{ row.source_model_version }}</code>.</p>
+  <p class="small">Brier: {{ row.original_calibration.brier_score|round(4) }} →
+  {{ row.transformed_calibration.brier_score|round(4) }}.
+  Walk-forward improved: {{ "yes" if row.grouped_walk_forward.improved else "no" }}.
+  <strong>This does not count toward prospective promotion.</strong></p>
+</div>
+{% endfor %}
+{% endif %}
+
 <h2>Promotion readiness by family</h2>
 <div class="table-scroll">
   <table>

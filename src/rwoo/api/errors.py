@@ -33,6 +33,8 @@ ERROR_CODES: dict[str, int] = {
     "INTERNAL_ERROR": 500,
     "NOT_FOUND": 404,
     "SERVICE_NOT_FOUND": 404,
+    "SIGNALS_UNAVAILABLE": 503,
+    "SIGNALS_STALE": 503,
 }
 
 # Codes that a check-market/cross-venue call surfaces as a *refused* decision

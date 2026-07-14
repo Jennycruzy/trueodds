@@ -1,9 +1,9 @@
 # Real-World Odds Oracle
 
-**Independent weather, economic-data, and sports probabilities for real-money decisions.**
+**Independent weather, commodity, economic-data, and sports probabilities for real-money decisions.**
 
 Real-World Odds Oracle is a live, agent-callable intelligence API built around
-three real-world domains: **weather**, **economic data**, and **sports**. It
+four real-world domains: **weather**, **commodities**, **economic data**, and **sports**. It
 turns forecast models, official releases, observation stations, rating systems,
 and tournament simulations into independent probabilities that agents can
 compare with live market prices before committing real money.
@@ -15,7 +15,7 @@ payrolls, rates, and supported recession structures. Sports services cover
 supported tournament, team, and match structures using explicit rating systems
 and deterministic simulation. Prediction markets are where these probabilities
 are priced and acted upon; they are not a substitute for the underlying
-weather, economic, or sports analysis.
+weather, commodity, economic, or sports analysis.
 
 - Public site: <https://trueodd.xyz>
 - API: <https://api.trueodd.xyz>
@@ -30,16 +30,20 @@ information an agent needs to decide whether an apparent edge survives model
 uncertainty, executable prices, spread, fees, source freshness, and evidence
 quality.
 
-## Three real-world intelligence domains
+## Four real-world intelligence domains
 
-The service combines three independently modeled capabilities in one API:
+The service combines four independently modeled capabilities in one API:
 
 1. **Weather** — station-bound daily high/low and precipitation probabilities
-   derived from multiple forecast models and checked against NOAA observations.
-2. **Economic data** — CPI, GDP, labor, rates, and recession structures tied to
+   derived from multiple forecast models and checked against NOAA observations,
+   plus NOAA-resolved Atlantic seasonal storm-count thresholds.
+2. **Commodities** — EIA-resolved Henry Hub annual-high thresholds backed by
+   official daily history; other energy and agriculture contracts are measured
+   but remain source-gated until their exact settlement feed is approved.
+3. **Economic data** — CPI, GDP, labor, rates, and recession structures tied to
    official release definitions and forward-looking official sources where
    available.
-3. **Sports** — structured tournament and match probabilities from explicit
+4. **Sports** — structured tournament and match probabilities from explicit
    rating systems and deterministic simulation rather than generated guesses.
 
 The durable advantage is the shared architecture across all three domains:
@@ -49,7 +53,7 @@ calibration, and verifiable receipts.
 
 ## What an agent receives
 
-For a supported weather event, economic release, or sports event, the oracle
+For a supported weather, commodity, economic-release, or sports event, the oracle
 returns:
 
 - independent YES probability;
@@ -70,6 +74,22 @@ Unsupported, ambiguous, stale, or insufficiently sourced markets are refused.
 Unknown inputs never silently become a zero probability.
 
 ## Agent services
+
+### `rwoo.best_signals` / `rwoo_best_signals`
+
+Request ranked opportunities using natural language. This is the primary command
+for an agent looking for signals.
+
+```http
+POST /v1/signals
+Content-Type: application/json
+
+{"message":"Give me the best weather signals now","limit":5}
+```
+
+The command returns only currently open candidates that pass freshness,
+trading-close, executable-quote, spread, and exact-model checks. A valid empty
+result uses `status: "no_signal"`.
 
 ### `rwoo.check_market`
 
@@ -152,6 +172,45 @@ The current production model is
 `weather-ensemble-v3-power-calibrated`. Results from earlier weather versions
 cannot promote v3.
 
+Structured Atlantic-season count contracts are a separate family,
+`weather.hurricane_season`. Their ranges and stated coverage are parsed from the
+current NOAA CPC outlook and reconciled with the live NHC season summary. A May
+preseason outlook is conditioned on observed season-to-date activity; an August
+update, which already incorporates the season to date, is not conditioned a
+second time.
+Only NOAA-resolved named-storm, hurricane, and major-hurricane count thresholds
+are accepted; landfall, damage, and individual-storm contracts are not silently
+treated as equivalent.
+
+### Energy and agriculture
+
+`energy.henry_hub_spot` prices structured EIA-resolved calendar-year Henry Hub
+daily-maximum thresholds. It uses the EIA DHHNGSP series through FRED's public
+mirror, first checks the full contract-year observed maximum, and then compares
+an unhit threshold with independent same-calendar-date historical remaining-year
+maximum ratios from full and recent official history. The corrected model is
+`henry-hub-seasonal-annual-max-v2`.
+
+Other energy prices (`energy.commodity_price`) and agricultural prices
+(`agriculture.commodity_price`) are discovered, classified, and included in
+unsupported-market telemetry, but remain `source_gated`. In particular, the
+service does not substitute an unrelated public quote for an ICE, Pyth, AAA, or
+other contract-specific settlement feed. A USDA report model will be enabled
+only when an actual recurring open USDA-resolved contract shape is verified;
+the API does not advertise a fabricated USDA product merely because USDA data
+exists.
+
+Natural-language family filters include:
+
+```json
+{"message":"Give me the best hurricane signals now","limit":5}
+{"message":"Give me the best Henry Hub natural gas signals now","limit":5}
+{"message":"Give me the best agriculture signals now","limit":5}
+```
+
+The third request currently returns `no_signal` rather than substituting another
+commodity family.
+
 ### Economic data
 
 Economic engines are bound to official definitions and release schedules.
@@ -171,17 +230,24 @@ forward distribution fail closed instead of borrowing an unrelated proxy.
 
 ### Sports
 
-Sports engines use explicit ratings and deterministic simulation.
+Sports coverage is exposed per family at `GET /v1/supported-markets`; a
+registered model identifier is not treated as proof that a current signal is
+available.
 
-- World Football Elo;
-- official FIFA ranking inputs;
-- 48-team World Cup tournament simulation;
-- historical tournament calibration;
-- supported tennis, NBA, MLB, and club-soccer structures behind coverage
-  checks.
+| Sport / family | Availability | Supported market shape | Data and boundary |
+|---|---|---|---|
+| FIFA World Cup (`sports.world_cup`) | Live signal candidates | 2026 national-team winner; stage of elimination | Official FIFA inputs, World Football Elo, deterministic 48-team simulation. Props, top scorer, goals, and exact matchup outcomes are unsupported. |
+| Tennis (`sports.tennis`) | Conditional engine; no qualifying current scan rows | Head-to-head match winner with exact YES binding | Ultimate Tennis Statistics Elo. Tournament winner outrights lack a wired draw/bracket simulation. |
+| MLB / baseball (`sports.mlb`) | Conditional engine; no qualifying current scan rows | Head-to-head game winner with exact YES binding | Official MLB completed-game results and current-season Elo; no pitcher/lineup adjustment. Champion outrights are unsupported. |
+| Club soccer (`sports.club_soccer`) | Conditional engine; no qualifying current scan rows | Head-to-head match winner with exact YES binding | ClubElo; unsuitable draw/home-field structures fail closed. |
+| NBA / basketball (`sports.nba`) | Conditional engine; no qualifying current scan rows | Head-to-head game winner with exact YES binding | ESPN season point differential. Champion futures remain model-missing. |
+| NHL / hockey (`sports.nhl`) | Unsupported; fails closed | None | Discovered champion futures have no approved champion model. |
+| Esports (`sports.esports`) | Unsupported; fails closed | None | No approved source and model are wired. |
 
-Props, esports, unsupported league champions, and unparsed composite markets
-remain visible in scan coverage but cannot be labeled actionable.
+The Best Signals command understands sport-specific requests. For example,
+`{"message":"Give me the best World Cup signals now"}` filters to
+`sports.world_cup`, while a basketball request returns `no_signal` instead of
+substituting another sport or domain.
 
 ## Real-money decision discipline
 
@@ -357,7 +423,7 @@ acceptance results. Tests under `tests/` remain deterministic and network-free.
 ```text
 Venue readers ──> canonical market + exact resolution rule
                          │
-Domain router ──> deterministic weather/economics/sports engine
+Domain router ──> deterministic weather/commodity/economics/sports engine
                          │
                   probability + interval
                          │

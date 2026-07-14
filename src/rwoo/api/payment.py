@@ -1,20 +1,16 @@
-"""OKX Agent Payments Protocol (x402) — HTTP 402 challenge and verification.
+"""Payment configuration plus the isolated development x402 test gate.
 
-This implements the *flow and the server-side authorization checks*, not a
-fabricated cryptographic scheme. An unpaid protected request gets a 402 whose
-body is the standard x402 challenge (``x402Version`` + ``accepts``); the client
-re-sends the identical request with an ``X-PAYMENT`` header carrying the
-scheme-native payment payload. The server then:
+Production facilitator mode is implemented exclusively by the official OKX
+seller middleware installed in :mod:`rwoo.api.app`. It verifies and settles a
+payment before a protected handler runs. The code below retains a small x402 v1
+gate only for deterministic, network-free development tests. That gate:
 
   * decodes ``X-PAYMENT`` (base64 JSON) — malformed => PAYMENT_INVALID;
   * checks the binding the challenge demanded — scheme, network (wrong-chain),
     asset (wrong-token), recipient (wrong-recipient), amount (insufficient),
     expiry (expired), and the per-request commitment (request hash + service);
   * rejects a replayed nonce => PAYMENT_REPLAYED;
-  * delegates the actual cryptographic settlement/verification to an injected
-    :class:`PaymentVerifier`. The real EVM/facilitator authorization inside
-    ``payload`` is NOT re-implemented or faked here — that is the facilitator's
-    job, and its exact schema must match the official OKX/x402 ``exact`` scheme.
+  * delegates authorization to an injected :class:`PaymentVerifier`.
 
 Design guarantees:
   * No buyer private key is ever accepted, logged, or stored.
@@ -46,6 +42,7 @@ DEFAULT_SCHEME = "exact"
 
 # service identifier -> env var holding its price in atomic token units
 _PRICE_ENV = {
+    "rwoo.best_signals": "RWOO_PRICE_BEST_SIGNALS",
     "rwoo.check_market": "RWOO_PRICE_CHECK_MARKET",
     "rwoo.cross_venue_edge": "RWOO_PRICE_CROSS_VENUE",
 }
@@ -68,9 +65,13 @@ class PaymentConfig:
     network: str | None = None
     asset: str | None = None
     asset_name: str | None = None
+    asset_version: str | None = None
     asset_decimals: int | None = None
     recipient: str | None = None
     facilitator_url: str | None = None
+    okx_api_key: str | None = field(default=None, repr=False)
+    okx_secret_key: str | None = field(default=None, repr=False)
+    okx_passphrase: str | None = field(default=None, repr=False)
     max_timeout_seconds: int = 300
     prices: dict[str, str] = field(default_factory=dict)
 
@@ -88,9 +89,13 @@ class PaymentConfig:
             network=_env("RWOO_PAYMENT_NETWORK"),
             asset=_env("RWOO_PAYMENT_ASSET"),
             asset_name=_env("RWOO_PAYMENT_ASSET_NAME"),
+            asset_version=_env("RWOO_PAYMENT_ASSET_VERSION"),
             asset_decimals=int(decimals) if decimals and decimals.isdigit() else None,
             recipient=_env("RWOO_PAYMENT_RECIPIENT"),
             facilitator_url=_env("RWOO_PAYMENT_FACILITATOR_URL"),
+            okx_api_key=_env("RWOO_OKX_API_KEY"),
+            okx_secret_key=_env("RWOO_OKX_SECRET_KEY"),
+            okx_passphrase=_env("RWOO_OKX_PASSPHRASE"),
             max_timeout_seconds=int(_env("RWOO_PAYMENT_MAX_TIMEOUT_SECONDS") or "300"),
             prices=prices,
         )
@@ -109,12 +114,20 @@ class PaymentConfig:
             missing.append("RWOO_PAYMENT_NETWORK")
         if not self.asset:
             missing.append("RWOO_PAYMENT_ASSET")
+        if not self.asset_version:
+            missing.append("RWOO_PAYMENT_ASSET_VERSION")
         if self.asset_decimals is None:
             missing.append("RWOO_PAYMENT_ASSET_DECIMALS")
         if not self.recipient:
             missing.append("RWOO_PAYMENT_RECIPIENT")
         if self.mode == "facilitator" and not self.facilitator_url:
             missing.append("RWOO_PAYMENT_FACILITATOR_URL")
+        if self.mode == "facilitator" and not self.okx_api_key:
+            missing.append("RWOO_OKX_API_KEY")
+        if self.mode == "facilitator" and not self.okx_secret_key:
+            missing.append("RWOO_OKX_SECRET_KEY")
+        if self.mode == "facilitator" and not self.okx_passphrase:
+            missing.append("RWOO_OKX_PASSPHRASE")
         for service in _PRICE_ENV:
             if self.price_for(service) is None:
                 missing.append(_PRICE_ENV[service])
@@ -183,55 +196,14 @@ class StubVerifier:
         )
 
 
-class FacilitatorVerifier:
-    """Live verification via the operator-configured OKX/x402 facilitator.
-
-    Structurally implemented but intentionally not exercised without an
-    operator-approved facilitator URL, recipient, asset, and network. The exact
-    request/response schema MUST be confirmed against official OKX Agent
-    Payments documentation before this path is enabled in production.
-    """
-
-    def __init__(self, config: PaymentConfig) -> None:
-        if not config.facilitator_url:
-            raise RuntimeError("facilitator mode requires RWOO_PAYMENT_FACILITATOR_URL")
-        self.facilitator_url = config.facilitator_url.rstrip("/")
-
-    def verify(self, config, service, resource, request_hash, payment) -> VerificationResult:
-        import httpx
-
-        body = {
-            "x402Version": X402_VERSION,
-            "scheme": config.scheme,
-            "network": config.network,
-            "resource": resource,
-            "payTo": config.recipient,
-            "asset": config.asset,
-            "maxAmountRequired": config.price_for(service),
-            "payment": payment,
-        }
-        try:
-            resp = httpx.post(f"{self.facilitator_url}/verify", json=body, timeout=20)
-            resp.raise_for_status()
-            data = resp.json()
-        except httpx.HTTPError as exc:  # do not leak facilitator internals
-            raise PaymentError("PAYMENT_INVALID", "facilitator could not verify the payment") from exc
-        if not data.get("isValid") and not data.get("valid"):
-            raise PaymentError("PAYMENT_INVALID", str(data.get("invalidReason") or "payment rejected"))
-        return VerificationResult(
-            success=True,
-            payment_reference=str(data.get("txHash") or data.get("payment_reference") or ""),
-            settlement={"mode": "facilitator", "network": config.network, "response": data},
-        )
-
-
 def select_verifier(config: PaymentConfig) -> PaymentVerifier:
     if not config.enabled or config.mode == "disabled":
         return DisabledVerifier()
     if config.mode == "stub":
         return StubVerifier(config.environment)  # raises in production
     if config.mode == "facilitator":
-        return FacilitatorVerifier(config)
+        # The official OKX middleware is the sole live verify+settle path.
+        return DisabledVerifier()
     raise RuntimeError(f"unknown RWOO_PAYMENT_MODE {config.mode!r}")
 
 
