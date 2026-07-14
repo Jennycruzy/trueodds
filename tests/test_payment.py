@@ -249,8 +249,16 @@ class ProductionSafetyTests(unittest.TestCase):
         with patch("x402.http.OKXFacilitatorClient", FakeFacilitator):
             client = paid_client(tempfile.mkdtemp(), cfg)
             response = client.post("/v1/signals", json={"message": "Give me the best signals"})
+            guessed_body_response = client.post(
+                "/v1/signals", json={"query": "Show calibration"},
+            )
 
         self.assertEqual(response.status_code, 402)
+        # Payment interception precedes FastAPI body validation. A marketplace
+        # probe that guessed the body must still receive the discoverable 402,
+        # not the business-layer 400 observed during the failed review.
+        self.assertEqual(guessed_body_response.status_code, 402)
+        self.assertIn("PAYMENT-REQUIRED", guessed_body_response.headers)
         encoded = response.headers.get("PAYMENT-REQUIRED")
         self.assertIsNotNone(encoded)
         challenge = json.loads(base64.b64decode(encoded))
@@ -262,6 +270,17 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(accepted["payTo"], cfg.recipient)
         self.assertEqual(accepted["maxTimeoutSeconds"], 60)
         self.assertEqual(accepted["extra"], {"name": "USD₮0", "version": "1", "decimals": 6})
+        discovery = challenge["extensions"]["bazaar"]
+        input_info = discovery["info"]["input"]
+        self.assertEqual(input_info["method"], "POST")
+        self.assertEqual(input_info["bodyType"], "json")
+        self.assertEqual(input_info["body"]["limit"], 5)
+        body_schema = discovery["schema"]["properties"]["input"]["properties"]["body"]
+        self.assertIn("message", body_schema["required"])
+        self.assertEqual(body_schema["properties"]["limit"]["maximum"], 10)
+        output_schema = discovery["schema"]["properties"]["output"]["properties"]["example"]
+        self.assertIn("request_id", output_schema["required"])
+        self.assertIn("signals", output_schema["properties"])
 
     def test_listing_probe_get_receives_challenge_before_business_logic(self):
         """The marketplace can probe and replay an identical body-free GET.
@@ -298,6 +317,13 @@ class ProductionSafetyTests(unittest.TestCase):
         self.assertEqual(challenge["x402Version"], 2)
         self.assertEqual(challenge["resource"]["url"], "http://testserver/v1/signals")
         self.assertEqual(challenge["accepts"][0]["payTo"], cfg.recipient)
+        discovery = challenge["extensions"]["bazaar"]
+        input_info = discovery["info"]["input"]
+        self.assertEqual(input_info["method"], "GET")
+        self.assertEqual(input_info["queryParams"]["limit"], 5)
+        query_schema = discovery["schema"]["properties"]["input"]["properties"]["queryParams"]
+        self.assertEqual(query_schema["properties"]["limit"]["maximum"], 10)
+        self.assertFalse(query_schema["additionalProperties"])
 
 
 if __name__ == "__main__":

@@ -236,6 +236,7 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
         from x402.http.middleware.fastapi import PaymentMiddlewareASGI
         from x402.http.okx_facilitator_client import OKXFacilitatorResponseError
         from x402.http.types import RouteConfig
+        from x402.extensions.bazaar import OutputConfig, declare_discovery_extension
         from x402.mechanisms.evm.exact.server import ExactEvmScheme
         from x402.schemas import AssetAmount
         from x402.server import x402ResourceServer
@@ -298,6 +299,77 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
     server = x402ResourceServer(facilitator)
     server.register(config.network, ExactEvmScheme())
 
+    def discovery_extension(method: str, service: str) -> dict[str, Any]:
+        """Describe paid request and response shapes inside the x402 challenge.
+
+        Review clients probe before they know our OpenAPI contract. The Bazaar extension
+        gives them the exact body/query schema needed for the paid replay instead of forcing
+        them to guess and receive a post-payment validation error.
+        """
+        response_model, output_example = {
+            SIGNAL_SERVICE: (SignalResponse, {
+                "request_id": "req_example",
+                "service": SIGNAL_SERVICE,
+                "status": "ok",
+                "created_at": "2026-07-14T00:00:00+00:00",
+                "answer": "Ranked currently open signals.",
+                "signals": [],
+                "filters": {},
+                "pagination": {},
+                "receipt": {"record_hash": "0" * 64},
+            }),
+            services.CHECK_MARKET_SERVICE: (CheckMarketResponse, {
+                "request_id": "req_example",
+                "service": services.CHECK_MARKET_SERVICE,
+                "status": "priced",
+                "created_at": "2026-07-14T00:00:00+00:00",
+                "market": {},
+                "receipt": {"record_hash": "0" * 64},
+            }),
+            services.CROSS_VENUE_SERVICE: (CrossVenueResponse, {
+                "request_id": "req_example",
+                "service": services.CROSS_VENUE_SERVICE,
+                "status": "evaluated",
+                "created_at": "2026-07-14T00:00:00+00:00",
+                "left": {},
+                "right": {},
+                "equivalence": {},
+                "actionable": False,
+                "receipt": {"record_hash": "0" * 64},
+            }),
+        }[service]
+        output = OutputConfig(
+            example=output_example,
+            schema=response_model.model_json_schema(),
+        )
+        if service == SIGNAL_SERVICE and method == "GET":
+            return declare_discovery_extension(
+                input={"message": "Give me the best signals now", "limit": 5},
+                input_schema={
+                    "properties": {
+                        "message": {"type": "string", "minLength": 3, "maxLength": 500},
+                        "limit": {"type": "integer", "minimum": 1, "maximum": 10},
+                        "min_minutes_to_close": {
+                            "type": ["integer", "null"], "minimum": 5, "maximum": 10080,
+                        },
+                        "cursor": {"type": ["string", "null"], "minLength": 8, "maxLength": 500},
+                    },
+                    "additionalProperties": False,
+                },
+                output=output,
+            )
+        request_model = {
+            SIGNAL_SERVICE: SignalRequest,
+            services.CHECK_MARKET_SERVICE: CheckMarketRequest,
+            services.CROSS_VENUE_SERVICE: CrossVenueRequest,
+        }[service]
+        return declare_discovery_extension(
+            input=request_model.model_config.get("json_schema_extra", {}).get("example", {}),
+            input_schema=request_model.model_json_schema(),
+            body_type="json",
+            output=output,
+        )
+
     routes = {}
     for method, path, service in (
         ("POST", "/v1/signals", SIGNAL_SERVICE),
@@ -323,6 +395,7 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
             )],
             mime_type="application/json",
             description=_SERVICE_DESCRIPTION[service],
+            extensions=discovery_extension(method, service),
         )
     app.add_middleware(PaymentMiddlewareASGI, routes=routes, server=server)
 

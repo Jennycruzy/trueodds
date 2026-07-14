@@ -80,6 +80,13 @@ class SignalRequest(_StrictModel):
     min_minutes_to_close: int | None = Field(default=None, ge=5, le=10080)
     cursor: str | None = Field(default=None, min_length=8, max_length=500)
 
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {"message": "Give me the best weather signals now", "limit": 5}
+        },
+    )
+
 
 # ----------------------------- responses ----------------------------------
 
