@@ -202,7 +202,7 @@ def create_app(
         if payment_response:
             response.headers[payment_mod.PAYMENT_RESPONSE_HEADER] = payment_response
         # Never cache priced responses or any API result.
-        if request.url.path.startswith("/v1") or request.url.path.startswith("/healthz"):
+        if request.url.path.startswith("/v1") or request.url.path in {"/health", "/healthz"}:
             response.headers["Cache-Control"] = "no-store"
         return response
 
@@ -490,6 +490,10 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
     # ------------------------- supporting endpoints -------------------------
     @app.get("/healthz", tags=["ops"], summary="Cheap liveness check")
     async def healthz():
+        return {"status": "ok", "version": API_VERSION}
+
+    @app.get("/health", tags=["ops"], summary="Compatibility liveness check")
+    async def health():
         return {"status": "ok", "version": API_VERSION}
 
     @app.get("/readyz", tags=["ops"], summary="Readiness: engine, ledger, paths, artifacts")

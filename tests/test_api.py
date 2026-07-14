@@ -242,6 +242,10 @@ class OpsAndCalibrationTests(unittest.TestCase):
     def test_health_and_ready(self):
         client, _ = client_for(self.tmp)
         self.assertEqual(client.get("/healthz").json()["status"], "ok")
+        health = client.get("/health")
+        self.assertEqual(health.status_code, 200)
+        self.assertEqual(health.json(), client.get("/healthz").json())
+        self.assertEqual(health.headers["Cache-Control"], "no-store")
         ready = client.get("/readyz")
         self.assertEqual(ready.status_code, 200)
         self.assertEqual(ready.json()["status"], "ready")
