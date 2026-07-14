@@ -26,6 +26,14 @@ from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 
 _HERE = Path(__file__).parent
 TEMPLATES = Jinja2Templates(directory=str(_HERE / "templates"))
+ACTIVE_EXPANSION_COVERAGE = [
+    item for item in EXPANSION_COVERAGE
+    if item["availability"] == "live_signal_candidate"
+]
+PUBLIC_MODEL_VERSIONS = {
+    family: version for family, version in MODEL_VERSIONS.items()
+    if family not in {"energy.commodity_price", "agriculture.commodity_price"}
+}
 
 NAV = [
     ("/", "Overview"),
@@ -145,10 +153,10 @@ def create_site(settings: Settings | None = None) -> FastAPI:
             errors=content.ERROR_TABLE,
             examples=content.code_examples(settings.api_base_url.rstrip("/")),
             changelog=content.CHANGELOG,
-            model_versions=MODEL_VERSIONS,
+            model_versions=PUBLIC_MODEL_VERSIONS,
             sports_coverage=SPORTS_COVERAGE,
             sports_scan=sports_scan_summary(scan),
-            expansion_coverage=EXPANSION_COVERAGE,
+            expansion_coverage=ACTIVE_EXPANSION_COVERAGE,
             expansion_scan=expansion_scan_summary(scan),
         )
 
@@ -174,7 +182,7 @@ def create_site(settings: Settings | None = None) -> FastAPI:
             venues=["kalshi", "polymarket", "limitless"],
             sports_coverage=SPORTS_COVERAGE,
             sports_scan=sports_scan_summary(scan),
-            expansion_coverage=EXPANSION_COVERAGE,
+            expansion_coverage=ACTIVE_EXPANSION_COVERAGE,
             expansion_scan=expansion_scan_summary(scan),
         )
 

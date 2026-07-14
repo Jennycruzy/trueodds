@@ -122,6 +122,19 @@ class RouteTests(unittest.TestCase):
         self.assertIn("PAYMENT-SIGNATURE", docs)
         self.assertIn("rwoo_best_signals — Best Signals", playground)
 
+    def test_public_site_promotes_active_odds_coverage_only(self):
+        c = client(settings_for(self.tmp, scan=a_scan()))
+        for route in ("/", "/markets", "/status"):
+            self.assertNotIn("Funded execution disabled", c.get(route).text)
+        markets = c.get("/markets").text
+        self.assertIn("Atlantic seasonal storm counts", markets)
+        self.assertIn("Henry Hub natural gas", markets)
+        self.assertNotIn("Agriculture prices and reports", markets)
+        self.assertNotIn("Other energy prices", markets)
+        docs = c.get("/docs").text
+        self.assertIn("exact settlement sources are not yet integrated", docs)
+        self.assertNotIn("source-gated", docs)
+
     def test_sports_are_documented_individually_with_truthful_states(self):
         c = client(settings_for(self.tmp, scan=a_scan()))
         for route in ("/docs", "/markets"):

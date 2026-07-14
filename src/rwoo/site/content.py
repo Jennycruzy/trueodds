@@ -78,11 +78,11 @@ CROSS_VENUE_RISK = ("Complementary executable-price edge, subject to fill, custo
                     "venue, cancellation, and settlement risk.")
 
 SUPPORTED_DOMAINS = [
-    ("Weather", "Daily temperature maxima/minima and precipitation for verified stations, plus NOAA-resolved Atlantic seasonal named-storm, hurricane, and major-hurricane count thresholds.", "supported"),
+    ("Weather", "Daily temperature maxima/minima and precipitation for verified stations.", "active"),
+    ("Atlantic hurricanes", "NOAA-resolved seasonal named-storm, hurricane, and major-hurricane count thresholds.", "active"),
+    ("Henry Hub natural gas", "EIA-resolved calendar-year daily spot-price maximum thresholds priced from official daily history.", "active"),
     ("Economics", "Headline & core CPI, GDP, unemployment, payrolls, Fed rate decisions, and recession-quarter nowcasts against official releases.", "supported"),
     ("Sports", "World Cup winner and stage-of-elimination markets currently produce candidates. Tennis, MLB, and club-soccer match engines are conditional; NBA, NHL, esports, props, and unsupported outrights fail closed as detailed below.", "partial"),
-    ("Energy", "EIA-resolved Henry Hub annual-high thresholds are priced from official daily history. Other energy price definitions remain source-gated.", "partial"),
-    ("Agriculture", "Agricultural markets are classified and measured, but exact price-feed and USDA report shapes remain source-gated until verified open contracts exist.", "discovery"),
 ]
 
 DEFERRED_DOMAINS = [
@@ -113,7 +113,7 @@ ERROR_TABLE = [
 ]
 
 CHANGELOG = [
-    ("v1.0.0", "ASP surface: Best Signals plus three supporting services, receipts, calibration evidence, and the OKX Agent Payments (x402) 402 flow. Funded execution remains disabled."),
+    ("v1.0.0", "ASP surface: Best Signals plus three supporting services, receipts, calibration evidence, and the OKX Agent Payments (x402) flow."),
 ]
 
 

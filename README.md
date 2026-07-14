@@ -37,9 +37,8 @@ The service combines four independently modeled capabilities in one API:
 1. **Weather** — station-bound daily high/low and precipitation probabilities
    derived from multiple forecast models and checked against NOAA observations,
    plus NOAA-resolved Atlantic seasonal storm-count thresholds.
-2. **Commodities** — EIA-resolved Henry Hub annual-high thresholds backed by
-   official daily history; other energy and agriculture contracts are measured
-   but remain source-gated until their exact settlement feed is approved.
+2. **Henry Hub natural gas** — EIA-resolved annual-high thresholds backed by
+   official daily history.
 3. **Economic data** — CPI, GDP, labor, rates, and recession structures tied to
    official release definitions and forward-looking official sources where
    available.
@@ -192,8 +191,9 @@ maximum ratios from full and recent official history. The corrected model is
 `henry-hub-seasonal-annual-max-v2`.
 
 Other energy prices (`energy.commodity_price`) and agricultural prices
-(`agriculture.commodity_price`) are discovered, classified, and included in
-unsupported-market telemetry, but remain `source_gated`. In particular, the
+(`agriculture.commodity_price`) are internal discovery telemetry, not advertised
+product capabilities. Their exact settlement sources are not yet integrated. In
+particular, the
 service does not substitute an unrelated public quote for an ICE, Pyth, AAA, or
 other contract-specific settlement feed. A USDA report model will be enabled
 only when an actual recurring open USDA-resolved contract shape is verified;
@@ -205,11 +205,7 @@ Natural-language family filters include:
 ```json
 {"message":"Give me the best hurricane signals now","limit":5}
 {"message":"Give me the best Henry Hub natural gas signals now","limit":5}
-{"message":"Give me the best agriculture signals now","limit":5}
 ```
-
-The third request currently returns `no_signal` rather than substituting another
-commodity family.
 
 ### Economic data
 

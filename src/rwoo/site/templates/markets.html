@@ -56,15 +56,14 @@ Everything else fails closed. Supported venues: {{ venues|join(", ") }}.</p>
 <div class="note empty"><p>No opportunity scan snapshot is currently published. This is an honest empty state.</p></div>
 {% endif %}
 
-<h2>Expanded weather and commodity coverage</h2>
-<p>The current artifact contains <strong>{{ expansion_scan.rows }}</strong> rows in these expansion families.
-Series selection comes from current settlement-source metadata, not a fixed ticker allow-list.</p>
+<h2>Active hurricane and Henry Hub coverage</h2>
+<p>These additional families have a wired probability engine and an exact resolution source.</p>
 <div class="table-scroll"><table>
   <thead><tr><th scope="col">Market / family</th><th scope="col">Current state</th><th scope="col">What can be priced</th><th scope="col">Sources / limits</th></tr></thead>
   <tbody>{% for s in expansion_coverage %}<tr>
     <td><strong>{{ s.market }}</strong><br><code>{{ s.family }}</code></td><td><code>{{ s.availability }}</code></td>
-    <td class="small">{{ s.market_shapes|join(", ") if s.market_shapes else "No approved priced shape" }}</td>
-    <td class="small">{{ s.data_sources|join(", ") if s.data_sources else "No approved source adapter" }}<br><span class="muted">{{ s.limitations }}</span></td>
+    <td class="small">{{ s.market_shapes|join(", ") }}</td>
+    <td class="small">{{ s.data_sources|join(", ") }}<br><span class="muted">{{ s.limitations }}</span></td>
   </tr>{% endfor %}</tbody>
 </table></div>
 
