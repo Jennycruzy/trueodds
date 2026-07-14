@@ -236,7 +236,6 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
         from x402.http.middleware.fastapi import PaymentMiddlewareASGI
         from x402.http.okx_facilitator_client import OKXFacilitatorResponseError
         from x402.http.types import RouteConfig
-        from x402.extensions.bazaar import OutputConfig, declare_discovery_extension
         from x402.mechanisms.evm.exact.server import ExactEvmScheme
         from x402.schemas import AssetAmount
         from x402.server import x402ResourceServer
@@ -338,14 +337,18 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                 "receipt": {"record_hash": "0" * 64},
             }),
         }[service]
-        output = OutputConfig(
-            example=output_example,
-            schema=response_model.model_json_schema(),
-        )
+        output_schema = response_model.model_json_schema()
         if service == SIGNAL_SERVICE and method == "GET":
-            return declare_discovery_extension(
-                input={"message": "Give me the best signals now", "limit": 5},
-                input_schema={
+            input_info = {
+                "type": "http",
+                "method": "GET",
+                "queryParams": {"message": "Give me the best signals now", "limit": 5},
+            }
+            input_properties = {
+                "type": {"type": "string", "const": "http"},
+                "method": {"type": "string", "enum": ["GET", "HEAD", "DELETE"]},
+                "queryParams": {
+                    "type": "object",
                     "properties": {
                         "message": {"type": "string", "minLength": 3, "maxLength": 500},
                         "limit": {"type": "integer", "minimum": 1, "maximum": 10},
@@ -356,19 +359,54 @@ def _install_official_x402(app: FastAPI, config: PaymentConfig) -> None:
                     },
                     "additionalProperties": False,
                 },
-                output=output,
-            )
-        request_model = {
-            SIGNAL_SERVICE: SignalRequest,
-            services.CHECK_MARKET_SERVICE: CheckMarketRequest,
-            services.CROSS_VENUE_SERVICE: CrossVenueRequest,
-        }[service]
-        return declare_discovery_extension(
-            input=request_model.model_config.get("json_schema_extra", {}).get("example", {}),
-            input_schema=request_model.model_json_schema(),
-            body_type="json",
-            output=output,
-        )
+            }
+            required_input = ["type", "method"]
+        else:
+            request_model = {
+                SIGNAL_SERVICE: SignalRequest,
+                services.CHECK_MARKET_SERVICE: CheckMarketRequest,
+                services.CROSS_VENUE_SERVICE: CrossVenueRequest,
+            }[service]
+            body_example = request_model.model_config.get("json_schema_extra", {}).get("example", {})
+            input_info = {
+                "type": "http", "method": method, "bodyType": "json", "body": body_example,
+            }
+            input_properties = {
+                "type": {"type": "string", "const": "http"},
+                "method": {"type": "string", "enum": ["POST", "PUT", "PATCH"]},
+                "bodyType": {"type": "string", "enum": ["json", "form-data", "text"]},
+                "body": request_model.model_json_schema(),
+            }
+            required_input = ["type", "method", "bodyType", "body"]
+
+        # Bazaar discovery is an x402 extension, not a payment primitive. Build its
+        # documented JSON shape directly so the pinned OKX seller SDK remains the
+        # only runtime dependency; newer optional x402 helper packages are unnecessary.
+        return {"bazaar": {
+            "info": {
+                "input": input_info,
+                "output": {"type": "json", "example": output_example},
+            },
+            "schema": {
+                "$schema": "https://json-schema.org/draft/2020-12/schema",
+                "type": "object",
+                "properties": {
+                    "input": {
+                        "type": "object", "properties": input_properties,
+                        "required": required_input, "additionalProperties": False,
+                    },
+                    "output": {
+                        "type": "object",
+                        "properties": {
+                            "type": {"type": "string"},
+                            "example": output_schema,
+                        },
+                        "required": ["type"],
+                    },
+                },
+                "required": ["input"],
+            },
+        }}
 
     routes = {}
     for method, path, service in (
