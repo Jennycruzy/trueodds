@@ -5,12 +5,12 @@
 The candidate was exercised on the VPS from
 `/opt/rwoo/staging/20260714-data-audit` before production deployment. Its full
 live scan completed without source errors across 5,929 canonical markets: 823
-were evaluated, 1,718 included, 895 unsupported, and 4,211 skipped. Expansion
+were evaluated, 1,749 included, 926 unsupported, and 4,180 skipped. Expansion
 counts are now emitted explicitly, including zeros:
 
 - `weather.hurricane_season`: 25
 - `energy.henry_hub_spot`: 7
-- `energy.commodity_price`: 5
+- `energy.commodity_price`: 45
 - `agriculture.commodity_price`: 0
 
 The audit found and fixed two discovery defects before release: dated Henry Hub
