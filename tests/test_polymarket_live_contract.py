@@ -192,5 +192,86 @@ class SettlementRequirementsTests(unittest.TestCase):
         json.dumps(self.build(self.market, notional=Decimal("1.5")))
 
 
+
+
+class SubmissionPackageTests(unittest.TestCase):
+    """The hand-back package must be sufficient for a caller to sign and post."""
+
+    def setUp(self):
+        from rwoo.adapters.polymarket import submission_package
+        self.build = submission_package
+        self.market = _parse_market(load("polymarket_live_market.json"), NOW)
+        self.book = _parse_book(load("polymarket_live_book.json"))
+        self.intent = {
+            "side": "YES", "token_id": self.market.tokens["YES"],
+            "price": "0.008", "quantity": "138", "time_in_force": "GTC",
+        }
+        self.assessment = validate_order(
+            {**self.intent, "price": "0.02"}, self.market, self.book,
+            now=self.book.timestamp + timedelta(seconds=1), max_staleness_seconds=15)
+
+    def package(self, **kw):
+        return self.build(self.intent, self.market, self.assessment, **kw)
+
+    def test_domain_matches_the_sdk(self):
+        domain = self.package()["eip712"]["domain"]
+        self.assertEqual(domain["name"], "Polymarket CTF Exchange")
+        self.assertEqual(domain["version"], "1")
+        self.assertEqual(domain["chainId"], 137)
+
+    def test_verifying_contract_follows_the_market_type(self):
+        import dataclasses
+        normal = self.package()["eip712"]["domain"]["verifyingContract"]
+        neg_market = dataclasses.replace(self.market, neg_risk=True)
+        neg = self.build(self.intent, neg_market, self.assessment)["eip712"]["domain"]["verifyingContract"]
+        self.assertEqual(normal, "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+        self.assertEqual(neg, "0xC5d563A36AE78145C45a50134d48A1215220f80a")
+        self.assertNotEqual(normal, neg)
+
+    def test_buy_amounts_are_exact_integers_in_base_units(self):
+        fixed = self.package(venue_side="BUY")["eip712"]["fields_fixed_by_oracle"]
+        # 0.008 * 138 = 1.104 USDC -> 1_104_000 base units; 138 contracts -> 138_000_000
+        self.assertEqual(fixed["makerAmount"], "1104000")
+        self.assertEqual(fixed["takerAmount"], "138000000")
+        self.assertEqual(fixed["side"], 0)
+
+    def test_sell_reverses_the_amounts(self):
+        fixed = self.package(venue_side="SELL")["eip712"]["fields_fixed_by_oracle"]
+        self.assertEqual(fixed["makerAmount"], "138000000")
+        self.assertEqual(fixed["takerAmount"], "1104000")
+        self.assertEqual(fixed["side"], 1)
+
+    def test_non_integral_amount_is_refused_not_rounded(self):
+        from rwoo.adapters.polymarket import _base_units
+        with self.assertRaises(ExecutionError) as ctx:
+            _base_units(Decimal("0.0000001"), name="test")
+        self.assertEqual(ctx.exception.code, "INVALID_EXECUTION")
+
+    def test_caller_owned_fields_are_never_supplied_by_us(self):
+        eip = self.package()["eip712"]
+        for field in ("salt", "maker", "signer", "nonce", "signatureType"):
+            self.assertIn(field, eip["fields_supplied_by_caller"])
+            self.assertNotIn(field, eip["fields_fixed_by_oracle"])
+
+    def test_service_declares_it_holds_no_credential(self):
+        pkg = self.package()
+        self.assertEqual(pkg["submitted_by"], "caller")
+        self.assertIn("holds no credential", pkg["submission"]["auth"])
+
+    def test_geographic_restriction_is_surfaced_to_the_caller(self):
+        # The caller submits, so the caller owns this constraint. Saying so is
+        # the whole point of the hand-back model.
+        self.assertIn("geoblock", self.package()["submission"]["note"])
+
+    def test_package_carries_settlement_and_pre_trade_context(self):
+        pkg = self.package()
+        self.assertEqual(pkg["settlement"]["collateral"]["address"],
+                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+        self.assertEqual(pkg["settlement"]["required_allowances"][0]["minimum"], "1.104")
+        self.assertEqual(pkg["pre_trade"]["validated_against_tick"], "0.001")
+
+    def test_package_is_json_serialisable(self):
+        json.dumps(self.package())
+
 if __name__ == "__main__":
     unittest.main()

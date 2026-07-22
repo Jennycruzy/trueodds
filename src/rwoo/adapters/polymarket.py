@@ -217,6 +217,139 @@ def settlement_requirements(market: MarketSnapshot, *, notional: Decimal | None 
     }
 
 
+# --------------------------------------------------------------------------
+# Caller-submittable order package ("prepare and hand back")
+#
+# The service prepares and validates the intent; the caller signs it AND submits
+# it themselves, from wherever they are lawfully able to trade. This keeps the
+# service out of custody *and* out of the venue's geographic restrictions, which
+# apply to whoever submits the order.
+#
+# For that to be usable, the response has to contain everything needed to sign
+# and post -- domain, contract, exact integer amounts, endpoint. Returning an
+# internal intent record is not enough: the caller cannot trade from it.
+#
+# Domain verified against py_order_utils (bundled with py-clob-client 0.34.6):
+# name="Polymarket CTF Exchange", version="1", chainId, verifyingContract=the
+# exchange for this market type.
+EIP712_DOMAIN_NAME = "Polymarket CTF Exchange"
+EIP712_DOMAIN_VERSION = "1"
+
+# Venue-native side encoding for the signed struct: 0 = BUY, 1 = SELL. Our
+# intents speak YES/NO (which outcome token) -- a different axis entirely.
+VENUE_SIDE_BUY = 0
+VENUE_SIDE_SELL = 1
+
+COLLATERAL_BASE_UNITS = 10 ** 6
+
+
+def _base_units(amount: Decimal, *, name: str) -> int:
+    """Convert a decimal amount to exact integer base units, or refuse.
+
+    Signed orders commit to integers. Rounding here would mean the caller signs
+    an amount that differs from the one we validated and receipted, so a
+    non-integral result is treated as a bug rather than quietly rounded.
+
+    In practice this always divides exactly for a valid order: tick sizes bottom
+    out at 0.0001 and sizes are whole contracts, so the product never exceeds
+    six decimal places.
+    """
+    scaled = amount * COLLATERAL_BASE_UNITS
+    if scaled != scaled.to_integral_value():
+        raise ExecutionError(
+            "INVALID_EXECUTION",
+            f"{name} does not convert to exact base units; refusing to round a signed amount",
+        )
+    return int(scaled)
+
+
+def submission_package(intent: dict[str, Any], market: MarketSnapshot,
+                       assessment: PreTradeAssessment, *,
+                       venue_side: str = "BUY",
+                       fee_rate_bps: int = 0) -> dict[str, Any]:
+    """Everything the caller needs to sign and submit this order themselves.
+
+    Deliberately does NOT include ``salt``, ``maker``, ``signer`` or ``nonce``:
+    those belong to the caller's wallet and are filled in locally. The service
+    pins the economically meaningful fields -- token, amounts, side, fee -- so
+    the decision receipt attests to exactly what gets signed.
+    """
+    if venue_side not in ("BUY", "SELL"):
+        raise ExecutionError("INVALID_EXECUTION", "venue_side must be BUY or SELL")
+
+    price = to_decimal(intent["price"], name="price")
+    size = to_decimal(intent["quantity"], name="quantity")
+    cost = price * size
+
+    # A BUY gives collateral and receives outcome tokens; a SELL is the reverse.
+    if venue_side == "BUY":
+        maker_amount = _base_units(cost, name="maker amount")
+        taker_amount = _base_units(size, name="taker amount")
+    else:
+        maker_amount = _base_units(size, name="maker amount")
+        taker_amount = _base_units(cost, name="taker amount")
+
+    exchange = EXCHANGE_BY_MARKET_TYPE[bool(market.neg_risk)]
+
+    return {
+        "venue": "polymarket",
+        "submitted_by": "caller",
+        "eip712": {
+            "domain": {
+                "name": EIP712_DOMAIN_NAME,
+                "version": EIP712_DOMAIN_VERSION,
+                "chainId": POLYGON_CHAIN_ID,
+                "verifyingContract": exchange["address"],
+            },
+            "primary_type": "Order",
+            # Pinned by the service; these are what the receipt attests to.
+            "fields_fixed_by_oracle": {
+                "tokenId": intent["token_id"],
+                "makerAmount": str(maker_amount),
+                "takerAmount": str(taker_amount),
+                "side": VENUE_SIDE_BUY if venue_side == "BUY" else VENUE_SIDE_SELL,
+                "feeRateBps": str(fee_rate_bps),
+                "taker": "0x0000000000000000000000000000000000000000",
+                "expiration": "0",
+            },
+            # Filled in locally by the caller's wallet; never supplied by us.
+            "fields_supplied_by_caller": [
+                "salt", "maker", "signer", "nonce", "signatureType",
+            ],
+        },
+        "submission": {
+            "method": "POST",
+            "url": "https://clob.polymarket.com/order",
+            "auth": (
+                "Caller's own L2 headers (POLY_ADDRESS, POLY_SIGNATURE, "
+                "POLY_TIMESTAMP, POLY_API_KEY, POLY_PASSPHRASE), derived from "
+                "the caller's key. This service holds no credential."
+            ),
+            "body_shape": {"order": "<signed order>", "owner": "<caller api key>",
+                           "orderType": intent.get("time_in_force", "GTC")},
+            "note": (
+                "Submit from a jurisdiction where you are permitted to trade. "
+                "The venue applies its geographic restrictions to whoever "
+                "submits the order. See "
+                "https://docs.polymarket.com/developers/CLOB/geoblock"
+            ),
+        },
+        "settlement": settlement_requirements(market, notional=cost),
+        "pre_trade": {
+            "best_bid": assessment.best_bid,
+            "best_ask": assessment.best_ask,
+            "spread": assessment.spread,
+            "marketable_depth": assessment.marketable_depth,
+            "book_age_seconds": assessment.book_age_seconds,
+            "validated_against_tick": canonical(market.tick_size),
+        },
+        "human_summary": (
+            f"{venue_side} {canonical(size)} {intent.get('side', '?')} contracts "
+            f"at {canonical(price)} for {canonical(cost)} USDC.e collateral"
+        ),
+    }
+
+
 class PolymarketDataSource(Protocol):
     def market(self, market_id: str) -> MarketSnapshot: ...
     def book(self, token_id: str) -> OrderBook: ...
