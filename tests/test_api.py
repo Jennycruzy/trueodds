@@ -30,6 +30,7 @@ def make_settings(tmp: str, **overrides) -> Settings:
         trusted_hosts=["testserver", "localhost"],
         allowed_origins=["http://testserver"],
         decision_ledger_path=Path(tmp) / "decisions.jsonl",
+        execution_db_path=Path(tmp) / "execution.sqlite3",
         calibration_report_path=Path(tmp) / "calibration_report.json",
     )
     base.update(overrides)
@@ -254,6 +255,53 @@ class PaymentGateTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             create_app(make_settings(self.tmp), fetch_market=lambda v, m: a_market(v, m),
                        evaluate=lambda m: priced_record(m), payment_config=incomplete)
+
+
+class ExecutionApiTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def payload(self):
+        return {
+            "venue": "polymarket", "market_id": "market-1", "token_id": "token-yes",
+            "side": "YES", "price": "0.42", "quantity": "2.5",
+            "time_in_force": "GTC", "event_group_id": "weather.temperature:abc123",
+        }
+
+    def receipt(self, client):
+        result = client.post(
+            "/v1/check-market",
+            json={"market": {"venue": "polymarket", "market_id": "market-1"}},
+        ).json()
+        return result["receipt"]["record_hash"]
+
+    def test_prepare_requires_idempotency_key_and_is_durable(self):
+        client, _ = client_for(self.tmp)
+        payload = self.payload()
+        payload["decision_receipt_hash"] = self.receipt(client)
+        missing = client.post("/v1/executions/prepare", json=payload)
+        self.assertEqual(missing.status_code, 400)
+        first = client.post("/v1/executions/prepare", json=payload,
+                            headers={"Idempotency-Key": "execution-1"})
+        second = client.post("/v1/executions/prepare", json=payload,
+                             headers={"Idempotency-Key": "execution-1"})
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(first.json()["intent_id"], second.json()["intent_id"])
+        inspected = client.get(f"/v1/executions/{first.json()['intent_id']}")
+        self.assertEqual(inspected.json()["notional"], "1.05")
+
+    def test_submit_fails_closed_by_default(self):
+        client, _ = client_for(self.tmp)
+        payload = self.payload()
+        payload["decision_receipt_hash"] = self.receipt(client)
+        prepared = client.post("/v1/executions/prepare", json=payload,
+                               headers={"Idempotency-Key": "execution-2"}).json()
+        response = client.post(f"/v1/executions/{prepared['intent_id']}/submit",
+                               json={"operator_approval_id": "operator-1"})
+        self.assertEqual(response.status_code, 423)
+        self.assertEqual(response.json()["error"]["code"], "EXECUTION_DISABLED")
+        state = client.get(f"/v1/executions/{prepared['intent_id']}").json()
+        self.assertEqual(state["state"], "PREPARED")
 
 
 class CrossVenueTests(unittest.TestCase):

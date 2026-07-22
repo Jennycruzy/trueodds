@@ -1,5 +1,18 @@
 # Build Gaps And Sequencing
 
+## 2026-07-21 durable execution control plane
+
+The repository now contains the first production execution layer: exact
+decimal order economics, a transactional SQLite intent/event ledger, durable
+idempotency, receipt-to-order binding, explicit order states including
+`UNKNOWN`, and prepare/inspect/submit/cancel/reconcile API operations. Funded
+submission fails closed by default and cannot be activated by an environment
+flag alone; a venue adapter must also be injected. See `docs/EXECUTION_API.md`.
+
+This closes the unsafe signal-to-in-memory-order gap, not the live venue gate.
+The pinned CLOB adapter, isolated signer, portfolio-wide risk service, account
+reconciler, and live certification remain required before capital activation.
+
 ## 2026-07-14 shared runtime-state correction
 
 A production audit found that the API and scheduled workers were bound to two
@@ -362,6 +375,12 @@ item 4 above.
 
 ## 2026-07-10 Production evidence and oracle-product hardening
 
+Historical note: the “optional gated consumer” and micro-stake sequence below
+records the 2026-07-10 decision. It is superseded by the 2026-07-21
+listing-stable, revenue-scale execution plan linked in the authoritative
+funded-execution section. The evidence gates remain valid; the small product
+framing does not.
+
 Completed:
 
 - Unknown World Cup entities/regions fail closed instead of becoming false zeroes.
@@ -383,8 +402,8 @@ Immediate remaining work:
 2. Review results without moving the checkpoint.
 3. Complete the hosted calibration UI and OKX ASP callable surface.
 4. Submit the read-only paid oracle for OKX review without waiting for trading.
-5. Only after a pass, add a disabled authenticated Kalshi adapter and approve
-   micro-stake limits explicitly.
+5. Only after a pass, permit that model family to use the production execution
+   platform under an explicitly approved capital tier.
 
 Operational handoff: `docs/POST_ASP_HANDOFF.md` separates the immediate ASP
 launch/listing path from the time-dependent evidence path and is the starting
@@ -738,6 +757,16 @@ Completion criteria:
 
 Current status: not built.
 
+The 2026-07-21 external repository review and recommended official-SDK,
+backtest, signer, and risk-gateway boundaries are recorded in
+[`PREDICTION_MARKET_EXECUTION_RESEARCH.md`](PREDICTION_MARKET_EXECUTION_RESEARCH.md).
+No reviewed third-party bot is approved for direct production installation.
+The listing-stable, revenue-scale target architecture and corrected production
+release train are recorded in
+[`LISTING_STABLE_MILLION_DOLLAR_EXECUTION_PLAN.md`](LISTING_STABLE_MILLION_DOLLAR_EXECUTION_PLAN.md).
+That document replaces the prior small-sample/micro-canary product framing and
+adds an explicit freeze on routine edits to Agent #5560.
+
 What exists: `src/rwoo/scanner.py` finds and ranks actionable cost-adjusted
 candidates from broad live Kalshi/Polymarket markets and read-only Limitless
 market data. It writes JSON/Markdown artifacts and Phase 8 proves the scanner
@@ -766,10 +795,16 @@ blocker.
 
 Completion criteria:
 
-- Add dry-run and live modes with explicit risk limits.
-- Wire authenticated exchange/order APIs only after credentials are approved.
-- Record every submitted order and fill as a receipt.
-- Make live mode impossible without explicit operator configuration.
+- Preserve Agent #5560 and expose the full order lifecycle through the stable,
+  backward-compatible operation envelope.
+- Add durable payment, usage, intent, order, fill, settlement, P&L, and audit
+  ledgers with exact arithmetic and idempotency.
+- Deploy an isolated signer, deterministic risk service, pinned official venue
+  adapter, user WebSocket consumer, REST reconciler, cancellation, and recovery.
+- Pass full-universe historical, unknown-outcome, restart, duplicate, capacity,
+  security, backup/restore, and failover certification.
+- Wire authenticated venue APIs only after the custody model, credentials,
+  capital tiers, and explicit operator activation are approved.
 
 ### Limitless venue expansion
 

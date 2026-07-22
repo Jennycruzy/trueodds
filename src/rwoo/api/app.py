@@ -55,6 +55,9 @@ from rwoo.api.schemas import (
     MarketCandidatesResponse,
     SignalRequest,
     SignalResponse,
+    PrepareExecutionRequest,
+    SubmitExecutionRequest,
+    ExecutionResponse,
 )
 from rwoo.api import services
 from rwoo.api.signals import SERVICE as SIGNAL_SERVICE, rank_signals
@@ -66,6 +69,7 @@ from rwoo.expansion_coverage import (
 )
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES, evaluate_market
 from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
+from rwoo.execution import ExecutionCoordinator, ExecutionError, ExecutionStore
 
 REQUEST_ID_HEADER = "X-Request-ID"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -77,6 +81,7 @@ _IDEMPOTENT_ROUTES = {
     ("POST", "/v1/signals"),
     ("POST", "/v1/check-market"),
     ("POST", "/v1/cross-venue-edge"),
+    ("POST", "/v1/executions/prepare"),
 }
 
 _SECURITY_HEADERS = {
@@ -93,9 +98,9 @@ def _request_id(request: Request) -> str:
 
 
 _SERVICE_DESCRIPTION = {
-    "rwoo.best_signals": "Ranked conversational signals filtered for freshness, trading close, executable quotes, spread, model consistency, and evidence.",
-    "rwoo.check_market": "Independent probability, interval, executable-price EV, why-trace, and receipt for one market.",
-    "rwoo.cross_venue_edge": "Conservative cross-venue equivalence and executable complementary edge with risk disclosure.",
+    "rwoo.best_signals": "Ranks open Kalshi, Polymarket, and Limitless opportunities across supported weather, economics, Henry Hub natural gas, and sports markets after freshness, price, spread, model, and evidence checks.",
+    "rwoo.check_market": "Evaluates one supported weather, economics, Henry Hub, or sports market on Kalshi, Polymarket, or Limitless, returning probability, uncertainty, executable-price EV, source trace, calibration, and a receipt.",
+    "rwoo.cross_venue_edge": "Compares equivalent contracts across Kalshi, Polymarket, and Limitless; verifies event rules, resolution authority, timing, and YES orientation; then reports conservative executable edge and risk.",
 }
 
 _PROBABILITY_BANDS = tuple(f"{index / 10:.1f}-{(index + 1) / 10:.1f}" for index in range(10))
@@ -192,6 +197,7 @@ def create_app(
     evaluate=evaluate_market,
     payment_config: PaymentConfig | None = None,
     payment_verifier=None,
+    execution_adapter=None,
 ) -> FastAPI:
     settings = settings or get_settings()
     payment_config = payment_config if payment_config is not None else PaymentConfig.from_env()
@@ -226,6 +232,12 @@ def create_app(
     app.state.payment_config = payment_config
     app.state.payment_verifier = payment_verifier if payment_verifier is not None else select_verifier(payment_config)
     app.state.replay_store = ReplayStore()
+    app.state.execution = ExecutionCoordinator(
+        ExecutionStore(settings.execution_db_path),
+        mode=settings.execution_mode,
+        adapter=execution_adapter,
+        max_order_usd=settings.execution_max_order_usd,
+    )
 
     if payment_config.enabled and payment_config.mode == "facilitator":
         _install_official_x402(app, payment_config)
@@ -719,6 +731,12 @@ def _register_exception_handlers(app: FastAPI) -> None:
 
 
 def _register_routes(app: FastAPI, settings: Settings) -> None:
+    def _execution_call(call):
+        try:
+            return call()
+        except ExecutionError as exc:
+            raise OracleError(exc.code, str(exc)) from exc
+
     # ------------------------- paid services -------------------------
     async def _best_signals(request: Request, body: SignalRequest):
         payload = body.model_dump()
@@ -883,6 +901,69 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         )
         return result
 
+    @app.post(
+        "/v1/executions/prepare", response_model=ExecutionResponse, tags=["execution"],
+        summary="Durably prepare and risk-check a Polymarket limit-order intent",
+        responses={409: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}},
+    )
+    async def prepare_execution(request: Request, body: PrepareExecutionRequest):
+        key = request.headers.get(IDEMPOTENCY_HEADER)
+        if not key:
+            raise OracleError("INVALID_EXECUTION", "Idempotency-Key is required for execution preparation")
+        receipt = request.app.state.receipt_store.find(body.decision_receipt_hash)
+        if receipt is None:
+            raise OracleError("INVALID_EXECUTION", "decision receipt was not found")
+        decision = receipt.payload
+        economics = decision.get("economics") or {}
+        if (
+            decision.get("service") != services.CHECK_MARKET_SERVICE
+            or economics.get("actionable") is not True
+            or decision.get("venue") != body.venue
+            or decision.get("market_id") != body.market_id
+            or decision.get("event_group_id") != body.event_group_id
+            or economics.get("side") != body.side
+        ):
+            raise OracleError(
+                "INVALID_EXECUTION",
+                "execution intent does not match an actionable check-market decision receipt",
+            )
+        intent, _ = _execution_call(lambda: request.app.state.execution.prepare(body.model_dump(), key))
+        return intent
+
+    @app.post(
+        "/v1/executions/{intent_id}/submit", response_model=ExecutionResponse, tags=["execution"],
+        summary="Submit a prepared intent when the funded execution interlock is unlocked",
+        responses={403: {"model": ErrorEnvelope}, 423: {"model": ErrorEnvelope}},
+    )
+    async def submit_execution(intent_id: str, request: Request, body: SubmitExecutionRequest):
+        return _execution_call(lambda: request.app.state.execution.submit(
+            intent_id, body.operator_approval_id,
+        ))
+
+    @app.get(
+        "/v1/executions/{intent_id}", response_model=ExecutionResponse, tags=["execution"],
+        summary="Inspect durable execution state and its transition history",
+    )
+    async def get_execution(intent_id: str, request: Request):
+        intent = request.app.state.execution.store.get(intent_id)
+        if intent is None:
+            raise OracleError("EXECUTION_NOT_FOUND", "execution intent was not found")
+        return intent
+
+    @app.post(
+        "/v1/executions/{intent_id}/cancel", response_model=ExecutionResponse, tags=["execution"],
+        summary="Cancel an unsubmitted intent or request venue cancellation",
+    )
+    async def cancel_execution(intent_id: str, request: Request):
+        return _execution_call(lambda: request.app.state.execution.cancel(intent_id))
+
+    @app.post(
+        "/v1/executions/{intent_id}/reconcile", response_model=ExecutionResponse, tags=["execution"],
+        summary="Resolve an ambiguous or nonterminal order state from the venue",
+    )
+    async def reconcile_execution(intent_id: str, request: Request):
+        return _execution_call(lambda: request.app.state.execution.reconcile(intent_id))
+
     @app.get(
         "/v1/calibration", response_model=CalibrationResponse,
         tags=["calibration"], summary="Public calibration summary",
@@ -998,7 +1079,20 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             "docs_url": settings.docs_url,
             "openapi_url": f"{settings.api_base_url.rstrip('/')}/openapi.json",
             "support_email": settings.support_email,
-            "execution_enabled": False,
+            "execution_enabled": request.app.state.execution.live_enabled,
+            "execution": {
+                "mode": request.app.state.execution.mode,
+                "prepare_available": True,
+                "live_submission_available": request.app.state.execution.live_enabled,
+                "max_order_usd": str(request.app.state.execution.max_order),
+                "endpoints": {
+                    "prepare": f"{settings.api_base_url.rstrip('/')}/v1/executions/prepare",
+                    "inspect": f"{settings.api_base_url.rstrip('/')}/v1/executions/{{intent_id}}",
+                    "submit": f"{settings.api_base_url.rstrip('/')}/v1/executions/{{intent_id}}/submit",
+                    "cancel": f"{settings.api_base_url.rstrip('/')}/v1/executions/{{intent_id}}/cancel",
+                    "reconcile": f"{settings.api_base_url.rstrip('/')}/v1/executions/{{intent_id}}/reconcile",
+                },
+            },
             "payment": {
                 "protocol": "OKX Agent Payments (x402)",
                 "x402_version": 2,
@@ -1024,7 +1118,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
                 svc("rwoo.cross_venue_edge", "/v1/cross-venue-edge",
                     _SERVICE_DESCRIPTION["rwoo.cross_venue_edge"], True, ["POST"]),
                 svc("rwoo.get_calibration", "/v1/calibration",
-                    "Public precommitted calibration record by family, model version, and probability band.",
+                    "Returns exact-version calibration for supported weather, economics, Henry Hub, and sports families, including independent resolution counts, probability-band results, and checkpoint status.",
                     False, ["GET"]),
             ],
             "service_readiness": {
@@ -1168,7 +1262,8 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
             "resolved_forecasts": (report or {}).get("resolved_forecasts", 0),
             "independent_resolved_event_groups": (report or {}).get("independent_resolved_event_groups", 0),
             "decision_ledger_verification": ledger_ok,
-            "execution_enabled": False,
+            "execution_enabled": request.app.state.execution.live_enabled,
+            "execution_mode": request.app.state.execution.mode,
         }
 
     @app.get("/v1/receipts/{record_hash}", tags=["receipts"], summary="Fetch a decision receipt")

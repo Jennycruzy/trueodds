@@ -36,6 +36,13 @@ ERROR_CODES: dict[str, int] = {
     "SERVICE_NOT_FOUND": 404,
     "SIGNALS_UNAVAILABLE": 503,
     "SIGNALS_STALE": 503,
+    "INVALID_EXECUTION": 400,
+    "EXECUTION_NOT_FOUND": 404,
+    "EXECUTION_DISABLED": 423,
+    "INVALID_EXECUTION_STATE": 409,
+    "RISK_LIMIT_EXCEEDED": 422,
+    "APPROVAL_REQUIRED": 403,
+    "INVALID_VENUE_RESPONSE": 502,
 }
 
 # Codes that a check-market/cross-venue call surfaces as a *refused* decision

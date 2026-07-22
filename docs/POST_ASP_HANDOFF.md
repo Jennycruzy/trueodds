@@ -1,6 +1,7 @@
 # Post-ASP Handoff: Mainnet Listing Acceptance
 
-Last updated: 2026-07-13
+Last updated: 2026-07-21 (listing-stable execution architecture; dated
+production facts below retain their original audit dates)
 
 The callable natural-language signal layer is deployed on `trueodd.xyz`, and
 all production services use the weather v3 model. Payments target X Layer
@@ -11,6 +12,19 @@ The Agentic Wallet logged in by email is the receiving wallet and the buyer-side
 TEE signer. Its X Layer address is already the configured `payTo` recipient.
 That wallet session is distinct from the server-to-broker authentication used
 by the OKX seller SDK during payment verification and settlement.
+
+The reviewed external data, backtesting, research-agent, and Polymarket
+execution repositories are classified in
+[`PREDICTION_MARKET_EXECUTION_RESEARCH.md`](PREDICTION_MARKET_EXECUTION_RESEARCH.md).
+That inventory is an engineering input, not permission to install a bot or
+enable funded execution.
+
+The production execution and commercial-continuity architecture is defined in
+[`LISTING_STABLE_MILLION_DOLLAR_EXECUTION_PLAN.md`](LISTING_STABLE_MILLION_DOLLAR_EXECUTION_PLAN.md).
+It supersedes the earlier “start small” framing: Agent #5560 and its marketplace
+history are to remain stable while a full execution platform is built behind a
+backward-compatible endpoint. Do not edit the ASP record as part of ordinary
+backend releases.
 
 ## Two workstreams continue in parallel
 
@@ -82,13 +96,16 @@ Record a dated GO / CONDITIONAL GO / NO-GO decision without moving the checkpoin
 ## Work explicitly deferred until a checkpoint pass
 
 - Authenticated Kalshi order submission.
-- Micro-stake funded weather execution.
-- Automatic stake sizing.
+- Funded activation of the production execution platform.
+- Automatic promotion through predeclared capital tiers.
 - Public claims based on realized trading performance.
 - Promotion of economics or sports based on weather evidence.
 
-After a pass, build a disabled-by-default, operator-approved, weather-only
-execution adapter with hard exposure/loss/drawdown limits and a kill switch.
+The checkpoint controls whether that exact model family may receive capital; it
+does not define the size of the execution system. Build the listing-stable
+platform in parallel, then activate only families whose independent gates pass.
+Every family remains subject to hard exposure/loss/drawdown limits and a global
+kill switch.
 
 ## Post-Claude verification checklist
 

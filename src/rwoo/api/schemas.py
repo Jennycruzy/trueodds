@@ -122,6 +122,26 @@ class SignalRequest(_StrictModel):
     )
 
 
+class PrepareExecutionRequest(_StrictModel):
+    venue: str = Field(default="polymarket", pattern="^polymarket$")
+    market_id: str = Field(..., min_length=1, max_length=256)
+    token_id: str = Field(..., min_length=1, max_length=256,
+                          description="Venue-native outcome token identifier; never a wallet secret.")
+    side: str = Field(..., pattern="^(YES|NO)$")
+    price: str = Field(..., min_length=1, max_length=32,
+                       description="Limit price as an exact decimal string between 0 and 1.")
+    quantity: str = Field(..., min_length=1, max_length=32,
+                          description="Contract quantity as an exact decimal string.")
+    time_in_force: str = Field(default="GTC", pattern="^(GTC|GTD|FOK|FAK)$")
+    event_group_id: str = Field(..., min_length=1, max_length=256)
+    decision_receipt_hash: str = Field(..., min_length=32, max_length=128,
+                                       description="Receipt for the actionable oracle decision authorizing this intent.")
+
+
+class SubmitExecutionRequest(_StrictModel):
+    operator_approval_id: str = Field(..., min_length=1, max_length=200)
+
+
 # ----------------------------- responses ----------------------------------
 
 
@@ -255,6 +275,29 @@ class MarketCandidatesResponse(_OpenModel):
     source: str
     freshness_status: str
     note: str
+
+
+class ExecutionResponse(_OpenModel):
+    intent_id: str
+    state: str
+    venue: str
+    market_id: str
+    token_id: str
+    side: str
+    price: str
+    quantity: str
+    notional: str
+    order_type: str
+    time_in_force: str
+    event_group_id: str
+    decision_receipt_hash: str | None = None
+    venue_order_id: str | None = None
+    filled_quantity: str = "0"
+    average_fill_price: str | None = None
+    last_error: str | None = None
+    created_at: str
+    updated_at: str
+    events: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ErrorEnvelope(_OpenModel):

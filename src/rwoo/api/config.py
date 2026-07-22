@@ -73,6 +73,12 @@ class Settings:
     evidence_ledger_path: Path = field(default_factory=lambda: Path(_env("RWOO_EVIDENCE_LEDGER_PATH", "data/receipts/forecast_evidence.jsonl")))
     decision_ledger_path: Path = field(default_factory=lambda: Path(_env("RWOO_DECISION_LEDGER_PATH", "data/receipts/decision_receipts.jsonl")))
 
+    # Execution is fail-closed. "disabled" still permits durable preparation
+    # and inspection, but never submits an order.
+    execution_db_path: Path = field(default_factory=lambda: Path(_env("RWOO_EXECUTION_DB_PATH", "data/execution/intents.sqlite3")))
+    execution_mode: str = field(default_factory=lambda: _env("RWOO_EXECUTION_MODE", "disabled").lower())
+    execution_max_order_usd: str = field(default_factory=lambda: _env("RWOO_EXECUTION_MAX_ORDER_USD", "10.00"))
+
     # Request handling limits.
     max_body_bytes: int = field(default_factory=lambda: _env_int("RWOO_MAX_BODY_BYTES", 32_768))
     upstream_timeout_seconds: float = field(default_factory=lambda: _env_float("RWOO_UPSTREAM_TIMEOUT_SECONDS", 20.0))

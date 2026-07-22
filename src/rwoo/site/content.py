@@ -27,7 +27,7 @@ SERVICES = [
         "path": "/v1/signals",
         "method": "POST",
         "paid": True,
-        "blurb": "Natural-language command returning ranked, currently open signals after freshness, close-time, executable-price, spread, model-version, and evidence checks.",
+        "blurb": "Ranks open Kalshi, Polymarket, and Limitless opportunities across supported weather, economics, Henry Hub natural gas, and sports markets after freshness, price, spread, model, and evidence checks.",
     },
     {
         "name": "rwoo.check_market",
@@ -35,7 +35,7 @@ SERVICES = [
         "path": "/v1/check-market",
         "method": "POST",
         "paid": True,
-        "blurb": "Independent probability, uncertainty interval, model version, confidence, executable-price EV, model-disagreement explanation, and a tamper-evident receipt for one supported market.",
+        "blurb": "Evaluates one supported weather, economics, Henry Hub, or sports market on Kalshi, Polymarket, or Limitless, returning probability, uncertainty, executable-price EV, source trace, calibration, and a receipt.",
     },
     {
         "name": "rwoo.cross_venue_edge",
@@ -43,7 +43,7 @@ SERVICES = [
         "path": "/v1/cross-venue-edge",
         "method": "POST",
         "paid": True,
-        "blurb": "Conservative cross-venue equivalence and executable complementary edge. Only exact equivalence is actionable, and it is never called risk-free.",
+        "blurb": "Compares equivalent contracts across Kalshi, Polymarket, and Limitless; verifies event rules, resolution authority, timing, and YES orientation; then reports conservative executable edge and risk.",
     },
     {
         "name": "rwoo.get_calibration",
@@ -51,7 +51,7 @@ SERVICES = [
         "path": "/v1/calibration",
         "method": "GET",
         "paid": False,
-        "blurb": "The public, precommitted calibration record by domain, family, model version, and probability band — with independent event counts always shown.",
+        "blurb": "Returns exact-version calibration for supported weather, economics, Henry Hub, and sports families, including independent resolution counts, probability-band results, and checkpoint status.",
     },
 ]
 
