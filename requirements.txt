@@ -4,3 +4,15 @@ fastapi>=0.115
 uvicorn[standard]>=0.30
 jinja2>=3.1
 okxweb3-app-x402[evm]==0.1.1
+
+# py-clob-client is intentionally absent: the app imports it nowhere, and this
+# service must never sign a venue order. It is pinned in requirements-spike.txt
+# and installed only in a scratch venv, off production.
+#
+# Note, so nobody mistakes this for more than it is: eth-account, eth-keys,
+# eth-keyfile and web3 are ALREADY on production as transitive dependencies of
+# okxweb3-app-x402[evm]. Excluding py-clob-client therefore removes a
+# venue-specific order-signing client, NOT the general ability to sign. The
+# guarantee that funds cannot move is that no key material exists on the box --
+# not that signing libraries are missing. Do not weaken the key handling on the
+# assumption that the libraries are absent.

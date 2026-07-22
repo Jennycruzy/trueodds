@@ -1,0 +1,40 @@
+# Dependencies for scripts/g0_spike.py ONLY. Deliberately NOT in
+# requirements.txt.
+#
+# WHY THIS IS A SEPARATE FILE
+# ---------------------------
+# The app imports py_clob_client nowhere (verified 2026-07-22), and the
+# production API must never sign a venue order. Shipping an order-signing client
+# to a box that has no business signing is an invitation, so it stays out.
+#
+# What this does NOT buy us, stated plainly so the threat model stays honest:
+# eth-account, eth-keys, eth-keyfile and web3 are ALREADY installed on
+# production as transitive dependencies of okxweb3-app-x402[evm]. Excluding
+# py-clob-client removes a venue-specific convenience, not the capability to
+# sign. The property that makes funds unmovable is that NO KEY MATERIAL EXISTS
+# on the box. That is the invariant to defend; library absence is not a control.
+#
+# Install into a scratch venv on the machine running the spike -- never on the
+# production VPS:
+#
+#     python -m venv .venv-spike && . .venv-spike/bin/activate
+#     pip install -r requirements-spike.txt
+#
+# PINNED, NOT RANGED
+# ------------------
+# The L2 HMAC is computed over a string rendered by the SDK
+# (json.dumps with separators=(",", ":"), ensure_ascii=False) and the server
+# reconstructs it its own way. A version bump that changes that rendering
+# silently breaks authentication and would look like the venue rejecting
+# relayed orders. Treat any upgrade as a change requiring a fresh G0 run.
+#
+# Verified against this exact version 2026-07-22:
+#   * RequestArgs carries serialized_body; create_level_2_headers prefers it
+#   * ClobClient.post_order sends data=request_args.serialized_body
+#   * get_contract_config(137) collateral == 0x2791Bca1...84174 (bridged USDC.e)
+
+py-clob-client==0.34.6
+
+# Used by the spike's relay stage and on-chain preflight. Matches the version
+# already pinned in requirements.txt so the two environments agree.
+httpx>=0.27
