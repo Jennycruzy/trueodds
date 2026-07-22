@@ -31,10 +31,27 @@ USAGE
     cp .env.spike.example .env.spike && chmod 600 .env.spike
     # fill in .env.spike, then:
     python scripts/g0_spike.py --pick-market      # find a market, no key needed
-    python scripts/g0_spike.py --dry-run          # everything except the POST
+    python scripts/g0_spike.py --dry-run          # preflight + sign, no POST
+    python scripts/g0_spike.py --approve          # set the allowance (costs gas)
     python scripts/g0_spike.py --live             # actually rests an order
 
 ``--dry-run`` is the default. ``--live`` spends real money; keep it tiny.
+
+PRICE IT TO REST, NOT TO FILL
+-----------------------------
+G0 only needs the venue to *accept* a relayed order — it does not need a trade.
+A BUY at or above the best ask matches immediately and leaves you holding a
+position. A BUY well below the best ask simply rests in the book: the venue
+returns an order id (the proof we want), you cancel it, and you end up owning
+nothing. Use ``--pick-market`` to see the touch, then price far away from it.
+
+FUNDING
+-------
+Polymarket settles in **bridged** USDC.e on Polygon
+(0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174), not native Circle USDC. Both
+report symbol "USDC" with 6 decimals on the same chain, so this is easy to get
+wrong and silent when you do. The preflight checks the right token, and tells
+you explicitly if your balance is sitting in the wrong one.
 
 SECRETS
 -------
@@ -124,6 +141,163 @@ def require_sdk():
             "        pip install py-clob-client\n"
             "      Pin the exact version you use into docs/EXECUTION_BUILD_PLAN.md (gate A)."
         )
+
+
+# ------------------------------------------------------- chain preflight
+#
+# The spike signs and relays, but an order also needs collateral and an
+# allowance. Without this check a balance/allowance rejection looks identical to
+# an auth failure, and G0 would be recorded as "the venue refuses relayed
+# orders" when the real cause is an unfunded wallet. That false negative would
+# push the whole plan to the weaker Variant B for no reason.
+
+POLYGON_RPCS = (
+    "https://polygon-bor-rpc.publicnode.com",
+    "https://polygon.llamarpc.com",
+    "https://polygon-rpc.com",
+)
+
+SEL_BALANCE_OF = "0x70a08231"   # balanceOf(address)
+SEL_ALLOWANCE = "0xdd62ed3e"    # allowance(address,address)
+SEL_APPROVE = "0x095ea7b3"      # approve(address,uint256)
+
+USDC_DECIMALS = 6
+
+
+def _rpc(method: str, params: list) -> object:
+    import httpx
+
+    payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
+    last = None
+    for url in POLYGON_RPCS:
+        try:
+            with httpx.Client(timeout=25) as client:
+                response = client.post(url, json=payload, headers={"User-Agent": "curl/8.5.0"})
+            data = response.json()
+            if "result" in data:
+                return data["result"]
+            last = data.get("error")
+        except Exception as exc:  # try the next endpoint
+            last = exc
+    die(f"all Polygon RPC endpoints failed: {last}")
+
+
+def _word(value: str | int) -> str:
+    if isinstance(value, str):
+        return value.lower().replace("0x", "").rjust(64, "0")
+    return f"{value:064x}"
+
+
+def _units(raw: int) -> str:
+    from decimal import Decimal
+    return f"{Decimal(raw) / Decimal(10 ** USDC_DECIMALS):.6f}".rstrip("0").rstrip(".")
+
+
+def chain_preflight(env: dict[str, str], required_units: int, spender: str,
+                    *, approve: bool) -> bool:
+    """Report POL, collateral balance, and allowance. Optionally set allowance.
+
+    Returns True when the wallet is ready to have an order accepted.
+    """
+    from rwoo.adapters.polymarket import COLLATERAL, NATIVE_USDC_NOT_COLLATERAL
+
+    owner = env["SPIKE_FUNDER_ADDRESS"]
+    token = COLLATERAL["address"]
+
+    step("0", "PREFLIGHT: on-chain balances and allowance")
+    print(f"   owner    {owner}")
+    print(f"   token    {token}  ({COLLATERAL['name']})")
+    print(f"   spender  {spender}")
+
+    gas_raw = int(_rpc("eth_getBalance", [owner, "latest"]), 16)
+    gas = gas_raw / 10 ** 18
+    bal_raw = int(_rpc("eth_call", [{"to": token, "data": SEL_BALANCE_OF + _word(owner)}, "latest"]) or "0x0", 16)
+    allow_raw = int(_rpc("eth_call", [
+        {"to": token, "data": SEL_ALLOWANCE + _word(owner) + _word(spender)}, "latest"
+    ]) or "0x0", 16)
+
+    ready = True
+    print()
+    print(f"   POL (gas)          {gas:.4f}" + ("" if gas > 0.05 else "   <-- low"))
+    if gas <= 0.005:
+        warn("not enough POL to send an approval transaction")
+        ready = False
+
+    print(f"   collateral balance {_units(bal_raw)} {COLLATERAL['symbol']}")
+    if bal_raw == 0:
+        # The single most likely funding mistake, so name it precisely.
+        wrong_raw = int(_rpc("eth_call", [
+            {"to": NATIVE_USDC_NOT_COLLATERAL, "data": SEL_BALANCE_OF + _word(owner)}, "latest"
+        ]) or "0x0", 16)
+        if wrong_raw > 0:
+            warn(f"you hold {_units(wrong_raw)} of NATIVE USDC ({NATIVE_USDC_NOT_COLLATERAL}).")
+            warn("Polymarket does not settle in that token. Swap or bridge to the address above.")
+        else:
+            warn("collateral balance is zero; fund the address above with bridged USDC.e")
+        ready = False
+    elif bal_raw < required_units:
+        warn(f"balance {_units(bal_raw)} is below the order notional {_units(required_units)}")
+        ready = False
+
+    print(f"   allowance          {_units(allow_raw)} {COLLATERAL['symbol']}")
+    if allow_raw < required_units:
+        if not approve:
+            warn(f"allowance below the {_units(required_units)} needed. Re-run with --approve to set it.")
+            ready = False
+        else:
+            ready = _send_approval(env, token, spender, required_units) and ready
+    else:
+        ok("allowance is sufficient")
+
+    return ready
+
+
+def _send_approval(env: dict[str, str], token: str, spender: str, required_units: int) -> bool:
+    """Send a BOUNDED ERC-20 approval. Never unlimited.
+
+    The signer runbook requires allowances capped to the active tier and
+    re-approved deliberately. An unlimited approval on a throwaway is harmless,
+    but the spike should model the practice the real flow must follow, so the
+    caller sees a bounded approval as the normal shape.
+    """
+    from eth_account import Account
+
+    # Approve a small, explicit buffer over the requirement rather than 2**256-1.
+    amount = required_units * 4
+    account = Account.from_key(env["SPIKE_PRIVATE_KEY"])
+    if account.address.lower() != env["SPIKE_FUNDER_ADDRESS"].lower():
+        die("--approve requires SPIKE_FUNDER_ADDRESS to be the key's own address "
+            "(a POLY_1271 deposit wallet must be approved by its owner separately)")
+
+    step("0b", f"PREFLIGHT: approving {_units(amount)} (bounded, not unlimited)")
+    nonce = int(_rpc("eth_getTransactionCount", [account.address, "pending"]), 16)
+    base_fee = int(_rpc("eth_gasPrice", []), 16)
+    tx = {
+        "to": token,
+        "value": 0,
+        "gas": 100_000,
+        "maxFeePerGas": base_fee * 2,
+        "maxPriorityFeePerGas": min(base_fee, 30_000_000_000),
+        "nonce": nonce,
+        "chainId": int(env.get("SPIKE_CHAIN_ID", "137")),
+        "data": SEL_APPROVE + _word(spender) + _word(amount),
+    }
+    signed = Account.sign_transaction(tx, account.key)
+    tx_hash = _rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex().lstrip("0x")])
+    ok(f"approval submitted: {tx_hash}")
+    print("   waiting for confirmation…")
+
+    import time
+    for _ in range(40):
+        time.sleep(3)
+        receipt = _rpc("eth_getTransactionReceipt", [tx_hash])
+        if receipt:
+            if int(receipt.get("status", "0x0"), 16) == 1:
+                ok("approval confirmed")
+                return True
+            die(f"approval transaction reverted: {tx_hash}")
+    warn("approval not confirmed within 2 minutes; check the hash before continuing")
+    return False
 
 
 # ---------------------------------------------------------------- discovery
@@ -317,6 +491,10 @@ def main() -> None:
                         help="actually POST the order (spends real money)")
     parser.add_argument("--dry-run", action="store_true", default=True,
                         help="do everything except the POST (default)")
+    parser.add_argument("--approve", action="store_true",
+                        help="set the ERC-20 allowance if it is short (sends a tx, costs gas)")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="skip the on-chain balance/allowance check")
     args = parser.parse_args()
 
     host = os.environ.get("SPIKE_CLOB_HOST", "https://clob.polymarket.com")
@@ -332,6 +510,38 @@ def main() -> None:
     require_sdk()
     env = load_env()
     host = env.get("SPIKE_CLOB_HOST", host)
+
+    if not args.skip_preflight:
+        # The required allowance spender depends on this market's neg_risk flag,
+        # so it is resolved from the live market rather than hardcoded.
+        sys.path.insert(0, str(REPO / "src"))
+        from decimal import Decimal
+
+        from rwoo.adapters.polymarket import EXCHANGE_BY_MARKET_TYPE, _parse_market
+
+        import httpx
+        condition_id = env.get("SPIKE_CONDITION_ID")
+        if not condition_id:
+            die("SPIKE_CONDITION_ID is required for the preflight "
+                "(or pass --skip-preflight)")
+        with httpx.Client(timeout=30, headers={"User-Agent": "curl/8.5.0"}) as client:
+            response = client.get(f"{host}/markets/{condition_id}")
+            response.raise_for_status()
+        from datetime import datetime, timezone
+        market = _parse_market(response.json(), datetime.now(timezone.utc))
+        spender = EXCHANGE_BY_MARKET_TYPE[bool(market.neg_risk)]["address"]
+
+        notional = Decimal(env.get("SPIKE_PRICE", "0.02")) * Decimal(env.get("SPIKE_SIZE", "5"))
+        required_units = int(notional * (10 ** 6))
+
+        ready = chain_preflight(env, required_units, spender, approve=args.approve)
+        if not ready and args.live:
+            die("preflight failed; refusing --live so a funding problem is not "
+                "misrecorded as a Variant A failure. Fix the above, or re-run "
+                "with --approve.")
+        if not ready:
+            warn("preflight incomplete — a --live run would likely be rejected "
+                 "for funding, not for auth.")
 
     if args.live:
         warn("LIVE MODE — this will rest a real order with real funds.")
