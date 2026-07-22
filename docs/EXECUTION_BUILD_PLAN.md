@@ -10,6 +10,69 @@ criterion that is a *verifiable artifact*, not a feeling. Nothing advances on
 
 ---
 
+## G0 RESULT — 2026-07-22: BLOCKED, and not for a technical reason
+
+The first funded run did not answer the Variant A question. It surfaced a
+larger one that sits above the whole execution plan.
+
+    HTTP 403
+    {"error": "Trading restricted in your region, please refer to available
+     regions - https://docs.polymarket.com/developers/CLOB/geoblock"}
+
+**Polymarket geoblocks the party that submits the order — i.e. the relay's IP,
+not the caller's.** Per Polymarket's published restrictions (read 2026-07-22),
+"close-only" jurisdictions may close existing positions but **cannot place new
+orders**. That list includes the **United States**, the **United Kingdom**, and
+the Canadian provinces of **Quebec, Ontario, British Columbia and Alberta**,
+plus France, Germany, Italy, Australia, Singapore, Poland, Brazil and others.
+
+Both hosts available to this project are inside that list:
+
+| Host | Location | Status |
+|---|---|---|
+| Test runner (codespace) | London, GB | restricted — produced the 403 |
+| Production VPS `38.49.216.59` | Montréal, Quebec, CA | **also restricted** |
+
+So "re-run it from production" does not work, and would not be legitimate if it
+did. This is not an infrastructure problem to be routed around; the geoblock is
+a regulatory control and treating it as an obstacle is its own, much worse,
+category of risk.
+
+### What this does and does not tell us
+
+- **Variant A is neither proven nor disproven.** The 403 fires on geography, not
+  authentication. We still do not know whether the relayed HMAC validates.
+  Everything up to transmission worked: preflight green, L2 derived, order
+  signed, body frozen at 637 bytes and forwarded byte-identical.
+- **The relay is the trading party, in the venue's eyes.** That is the finding
+  that matters. A design where TrueOdds submits the order makes TrueOdds' own
+  jurisdiction the binding constraint — and if it ever relayed for callers in
+  restricted regions, it would be supplying the mechanism by which those callers
+  trade. That is circumvention of a regulatory geoblock, which is a different
+  and far more serious thing than the custody question this plan started with.
+
+### Consequence: Phase 3 may be the wrong build
+
+`POST /v1/executions/{id}/submit-signed` puts TrueOdds in the submission path.
+The alternative preserves nearly all the product value and removes TrueOdds from
+that path entirely:
+
+> **Prepare-and-hand-back.** TrueOdds sells the signal, prepares the intent, and
+> runs the full pre-trade gate — binding, tick, min size, staleness, crossed
+> book, price protection, settlement requirements. It returns a validated,
+> ready-to-submit order intent plus a signed decision receipt. **The caller signs
+> AND submits it themselves**, from wherever they are lawfully able to trade.
+
+That keeps everything already built and paid for, stays non-custodial, and
+additionally keeps TrueOdds out of the geo/regulatory path. It is the same
+posture already chosen for Kalshi ("route, don't execute") — the geoblock
+suggests it may be the correct posture for Polymarket too.
+
+**This is a business decision, not an engineering one, and it blocks Phase 3.**
+It needs the counsel conversation that Phase 4 already lists — now, not later.
+
+---
+
 ## 0. The load-bearing question (resolve before Phase 3 is designed)
 
 `docs/EXECUTION_SIGNER_AND_CERTIFICATION.md:111-118` records a **verified** fact

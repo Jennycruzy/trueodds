@@ -151,10 +151,13 @@ def require_sdk():
 # orders" when the real cause is an unfunded wallet. That false negative would
 # push the whole plan to the weaker Variant B for no reason.
 
+# Verified 2026-07-22 to serve eth_chainId, eth_getTransactionCount, eth_gasPrice
+# and eth_maxPriorityFeePerGas without an API key. llamarpc, polygon-rpc.com,
+# ankr and blxrbdn were tested and now require keys or refuse outright.
 POLYGON_RPCS = (
     "https://polygon-bor-rpc.publicnode.com",
-    "https://polygon.llamarpc.com",
-    "https://polygon-rpc.com",
+    "https://1rpc.io/matic",
+    "https://polygon.drpc.org",
 )
 
 SEL_BALANCE_OF = "0x70a08231"   # balanceOf(address)
@@ -168,7 +171,11 @@ def _rpc(method: str, params: list) -> object:
     import httpx
 
     payload = {"jsonrpc": "2.0", "id": 1, "method": method, "params": params}
-    last = None
+    # Collect every failure rather than keeping only the last. A malformed
+    # request fails at the FIRST endpoint for an informative reason and at the
+    # rest for unrelated ones (rate limits, missing API keys); reporting only
+    # the last error hides the actual cause behind noise.
+    failures: list[str] = []
     for url in POLYGON_RPCS:
         try:
             with httpx.Client(timeout=25) as client:
@@ -176,10 +183,11 @@ def _rpc(method: str, params: list) -> object:
             data = response.json()
             if "result" in data:
                 return data["result"]
-            last = data.get("error")
+            failures.append(f"{url}: {data.get('error')}")
         except Exception as exc:  # try the next endpoint
-            last = exc
-    die(f"all Polygon RPC endpoints failed: {last}")
+            failures.append(f"{url}: {type(exc).__name__}: {exc}")
+    detail = "\n          ".join(failures)
+    die(f"{method} failed on every Polygon RPC endpoint:\n          {detail}")
 
 
 def _word(value: str | int) -> str:
@@ -283,7 +291,12 @@ def _send_approval(env: dict[str, str], token: str, spender: str, required_units
         "data": SEL_APPROVE + _word(spender) + _word(amount),
     }
     signed = Account.sign_transaction(tx, account.key)
-    tx_hash = _rpc("eth_sendRawTransaction", ["0x" + signed.raw_transaction.hex().lstrip("0x")])
+    # hexbytes 1.x returns .hex() WITHOUT a 0x prefix. Use removeprefix, never
+    # lstrip("0x") -- lstrip strips any leading '0' and 'x' characters, so a
+    # typed transaction beginning "02f86c..." becomes "2f86c...", silently
+    # corrupting the payload into an unparseable transaction.
+    raw = signed.raw_transaction.hex()
+    tx_hash = _rpc("eth_sendRawTransaction", ["0x" + raw.removeprefix("0x")])
     ok(f"approval submitted: {tx_hash}")
     print("   waiting for confirmation…")
 
