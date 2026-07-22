@@ -142,6 +142,81 @@ class PreTradeAssessment:
     book_age_seconds: float
 
 
+# --------------------------------------------------------------------------
+# Settlement requirements
+#
+# A caller who is going to sign their own order has to fund and approve the
+# right things first, and "USDC on Polygon" is not a sufficient answer: two
+# distinct tokens on Polygon both report symbol "USDC" with 6 decimals.
+# Polymarket settles in the *bridged* one. Funding native USDC leaves the agent
+# holding a balance it cannot trade with.
+#
+# So the contract address is the authority and the symbol is a human label.
+# Addresses verified against py-clob-client 0.34.6 ``get_contract_config`` and
+# cross-checked on-chain (name/symbol/decimals) 2026-07-22.
+POLYGON_CHAIN_ID = 137
+
+COLLATERAL = {
+    "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
+    "symbol": "USDC",
+    "name": "USD Coin (PoS)",
+    "decimals": 6,
+}
+
+# Same symbol, same decimals, same chain, different token. Named explicitly so
+# the warning we emit can point at the exact thing not to fund.
+NATIVE_USDC_NOT_COLLATERAL = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+
+# The allowance spender depends on the market: negative-risk markets settle
+# through a different exchange contract. Emitting one static address would tell
+# a subset of callers to approve the wrong contract.
+EXCHANGE_BY_MARKET_TYPE = {
+    False: {"address": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "role": "exchange"},
+    True: {"address": "0xC5d563A36AE78145C45a50134d48A1215220f80a", "role": "neg_risk_exchange"},
+}
+
+SIGNATURE_TYPES = {0: "EOA", 1: "POLY_PROXY", 2: "GNOSIS_SAFE", 3: "POLY_1271"}
+
+
+def settlement_requirements(market: MarketSnapshot, *, notional: Decimal | None = None) -> dict[str, Any]:
+    """Describe what the caller must hold and approve to sign this order.
+
+    Address-first and machine-readable, mirroring the shape the x402 payment
+    challenge already uses (network / asset / decimals), so an agent can consume
+    both with one parser. Computed per market rather than served statically,
+    because ``neg_risk`` changes which contract needs the allowance.
+    """
+    exchange = EXCHANGE_BY_MARKET_TYPE[bool(market.neg_risk)]
+    allowance: dict[str, Any] = {
+        "spender": exchange["address"],
+        "role": exchange["role"],
+        "token": COLLATERAL["address"],
+        "reason": "the exchange moves collateral on fill; approve before signing",
+    }
+    if notional is not None:
+        allowance["minimum"] = canonical(notional)
+    return {
+        "chain": f"eip155:{POLYGON_CHAIN_ID}",
+        "collateral": {
+            **COLLATERAL,
+            "caip19": f"eip155:{POLYGON_CHAIN_ID}/erc20:{COLLATERAL['address']}",
+            "warning": (
+                "Bridged USDC.e. This is NOT native USDC "
+                f"({NATIVE_USDC_NOT_COLLATERAL}), which shares the symbol "
+                "'USDC' and 6 decimals on this chain but cannot be traded here."
+            ),
+        },
+        "gas_token": {
+            "symbol": "POL",
+            "note": "native Polygon gas; needed for approvals only, not per order",
+        },
+        "required_allowances": [allowance],
+        "neg_risk_market": bool(market.neg_risk),
+        "signature_types": {str(k): v for k, v in SIGNATURE_TYPES.items()},
+        "custody": "the caller signs and holds funds throughout; this service never takes custody",
+    }
+
+
 class PolymarketDataSource(Protocol):
     def market(self, market_id: str) -> MarketSnapshot: ...
     def book(self, token_id: str) -> OrderBook: ...

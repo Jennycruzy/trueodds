@@ -147,5 +147,50 @@ class TickAllowListTests(unittest.TestCase):
             self.assertEqual(ctx.exception.code, "INVALID_VENUE_DATA")
 
 
+class SettlementRequirementsTests(unittest.TestCase):
+    """What the caller must fund and approve, stated address-first."""
+
+    def setUp(self):
+        from rwoo.adapters.polymarket import settlement_requirements
+        self.build = settlement_requirements
+        self.market = _parse_market(load("polymarket_live_market.json"), NOW)
+
+    def test_collateral_matches_the_sdk_contract_config(self):
+        # Guards against drift from py-clob-client's get_contract_config(137).
+        req = self.build(self.market)
+        self.assertEqual(req["collateral"]["address"],
+                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+        self.assertEqual(req["collateral"]["decimals"], 6)
+        self.assertEqual(req["chain"], "eip155:137")
+
+    def test_native_usdc_is_called_out_as_the_wrong_token(self):
+        from rwoo.adapters.polymarket import NATIVE_USDC_NOT_COLLATERAL
+        warning = self.build(self.market)["collateral"]["warning"]
+        self.assertIn(NATIVE_USDC_NOT_COLLATERAL, warning)
+        self.assertNotEqual(NATIVE_USDC_NOT_COLLATERAL,
+                            self.build(self.market)["collateral"]["address"])
+
+    def test_allowance_spender_follows_the_market_type(self):
+        import dataclasses
+        normal = self.build(self.market)["required_allowances"][0]
+        self.assertEqual(normal["role"], "exchange")
+        self.assertEqual(normal["spender"], "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+
+        neg = self.build(dataclasses.replace(self.market, neg_risk=True))["required_allowances"][0]
+        self.assertEqual(neg["role"], "neg_risk_exchange")
+        self.assertEqual(neg["spender"], "0xC5d563A36AE78145C45a50134d48A1215220f80a")
+        self.assertNotEqual(normal["spender"], neg["spender"])
+
+    def test_notional_is_rendered_canonically_when_supplied(self):
+        req = self.build(self.market, notional=Decimal("0.100"))
+        self.assertEqual(req["required_allowances"][0]["minimum"], "0.1")
+
+    def test_notional_is_omitted_when_unknown(self):
+        self.assertNotIn("minimum", self.build(self.market)["required_allowances"][0])
+
+    def test_response_is_json_serialisable_for_an_agent(self):
+        json.dumps(self.build(self.market, notional=Decimal("1.5")))
+
+
 if __name__ == "__main__":
     unittest.main()
