@@ -26,6 +26,17 @@ PUSD = "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB"
 APPROVE_SELECTOR = "0x095ea7b3"
 
 
+def _load_jit():
+    """Load the JIT policy module regardless of how this script was imported."""
+    import os
+    import sys
+
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    import jit_execution
+
+    return jit_execution
+
+
 def _word_address(value: str) -> str:
     return value.lower().removeprefix("0x").rjust(64, "0")
 
@@ -148,27 +159,60 @@ def main() -> None:
         type=Path,
     )
     parser.add_argument("--spender", required=True)
-    parser.add_argument("--approval-units", required=True, type=int)
+    parser.add_argument(
+        "--approval-units", type=int, default=0,
+        help="bounded pUSD allowance in base units; ignored when --max-approval is set",
+    )
+    parser.add_argument(
+        "--max-approval", action="store_true",
+        help="grant MaxUint256 under the autonomous JIT policy; requires --jit",
+    )
+    parser.add_argument(
+        "--jit", action="store_true",
+        help="acknowledge the JIT-to-zero policy that makes a MaxUint256 approval safe",
+    )
     parser.add_argument("--execute", action="store_true")
     args = parser.parse_args()
-    if args.approval_units <= 0:
-        raise SystemExit("--approval-units must be positive")
+
     if len(args.spender) != 42 or not args.spender.startswith("0x"):
         raise SystemExit("--spender must be a 0x-prefixed EVM address")
+
+    if args.max_approval:
+        # MaxUint256 is only ever granted through this explicit, acknowledged
+        # opt-in -- never as a default. Its safety depends entirely on the
+        # JIT-to-zero balance discipline (fund tight, sweep after), so require the
+        # caller to name that policy.
+        if not args.jit:
+            raise SystemExit(
+                "--max-approval requires --jit: an unlimited allowance is only safe "
+                "with the JIT-to-zero policy (fund exactly one order, sweep the rest "
+                "back to the owner). See scripts/jit_execution.py."
+            )
+        approval_units = _load_jit().MAX_UINT256
+        approval_kind = "maxuint256_jit_policy"
+    else:
+        if args.approval_units <= 0:
+            raise SystemExit(
+                "--approval-units must be positive (or pass --max-approval --jit)"
+            )
+        approval_units = args.approval_units
+        approval_kind = "bounded"
+
     if not args.execute:
         print(json.dumps({
             "owner": OWNER,
             "deposit_wallet": DEPOSIT_WALLET,
             "spender": args.spender,
-            "approval_units": args.approval_units,
+            "approval_units": approval_units,
+            "approval_kind": approval_kind,
             "private_key_required": False,
-            "actions": ["deploy_if_needed", "bounded_pusd_approval"],
+            "actions": ["deploy_if_needed", f"{approval_kind}_pusd_approval"],
         }, separators=(",", ":")))
         return
     execute(
         builder_creds_path=args.builder_credentials,
         spender=args.spender,
-        approval_units=args.approval_units,
+        approval_units=approval_units,
     )
 
 

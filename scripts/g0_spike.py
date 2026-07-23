@@ -564,7 +564,16 @@ def setup_deposit_wallet(env: dict[str, str], required_units: int, spender: str)
 
     token = collateral_config(env)["address"]
     owner = owner_client.get_address()
-    target_units = required_units * 4
+    # Autonomous JIT policy: fund exactly one order's worth and sweep the
+    # remainder to ~0 afterward, so the MaxUint256 approval below is only ever
+    # live over a single order's notional. Off the policy, keep the historical
+    # 4x buffer. jit and jit_execution stay in scope for the approval step below.
+    import os as _os
+    import sys as _sys
+    _sys.path.insert(0, _os.path.dirname(_os.path.abspath(__file__)))
+    import jit_execution
+    jit = jit_execution.jit_enabled(env)
+    target_units = jit_execution.jit_fund_units(required_units) if jit else required_units * 4
     wallet_balance = int(_rpc("eth_call", [{"to": token, "data": SEL_BALANCE_OF + _word(wallet)}, "latest"]) or "0x0", 16)
     if wallet_balance < required_units:
         transfer_units = max(target_units - wallet_balance, required_units - wallet_balance)
@@ -613,14 +622,17 @@ def setup_deposit_wallet(env: dict[str, str], required_units: int, spender: str)
         nonce = str(nonce_payload.get("nonce"))
         import time
         deadline = str(int(time.time()) + 900)
+        approval_units = jit_execution.exchange_approval_units(
+            jit_policy=jit, required_units=required_units
+        )
+        # Autonomous JIT policy (jit=True): the relayer forces MaxUint256, and
+        # safety comes from JIT-to-zero balance -- funded tight above, swept after
+        # -- not from the allowance number. Off the policy, stay bounded to this
+        # order and let the relayer reject it deliberately.
         call = DepositWalletCall(
             target=token,
             value="0",
-            # Keep the approval bounded to this order. The current Polymarket
-            # relayer rejects bounded exchange approvals and demands
-            # MaxUint256; fail there instead of granting drain-level authority
-            # over present and future collateral.
-            data=SEL_APPROVE + _word(spender) + _word(required_units),
+            data=SEL_APPROVE + _word(spender) + _word(approval_units),
         )
         response = relayer.execute_deposit_wallet_batch([call], wallet, nonce, deadline)
         ok(f"approval batch submitted: {response.transaction_id}")

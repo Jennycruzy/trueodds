@@ -238,14 +238,19 @@ First actions after resume:
 1. Do not redeploy the deposit wallet. Deployment is confirmed in Polygon
    transaction
    `0x055ab76765d34382f143fa098d55e42984c40809576d630ad1232263b00b5947`.
-2. Preserve the zero exchange allowance. Polymarket's relayer rejected a
-   bounded `0.1 pUSD` approval because it requires `MaxUint256`; do not satisfy
-   that requirement with an unlimited approval. Direct bounded simulation is
-   complete: it succeeds through the factory when called by the authorized
-   Polymarket operator, but the buyer receives `OnlyOperator()`. This is an
-   off-chain hosted-relayer policy incompatibility, not a wallet-contract
-   limitation. The autonomous bounded path requires Polymarket to accept
-   bounded approvals or authorize a TrueOdds factory operator.
+2. Exchange allowance — POLICY REVERSED 2026-07-23. Polymarket's relayer
+   rejects any bounded approval and requires `MaxUint256`; the buyer cannot
+   broadcast a bounded batch itself (factory returns `OnlyOperator()`), so a
+   bounded autonomous approval is impossible without Polymarket authorizing a
+   TrueOdds factory operator. Since autonomous is a hard requirement for the ASP,
+   TrueOdds now grants `MaxUint256` **and moves the safety to the balance layer**:
+   fund exactly one order's notional, approve `MaxUint256` once, trade, then sweep
+   the unspent pUSD back to the owner (`docs/evidence/G2`). Real exposure stays
+   capped at one order's notional. This is implemented in `scripts/jit_execution.py`
+   and is an **explicit, gated opt-in** (`--max-approval --jit`, or
+   `SPIKE_JIT_MAX_APPROVAL=1`), never a default. Do NOT park a large balance in the
+   deposit wallet — the JIT-to-zero discipline is what makes the unlimited approval
+   safe.
 3. Re-test POLY_1271 order validation now that the deposit wallet is deployed.
    Non-interactive EIP-712 signing, signature recovery, L2 credential creation,
    HMAC authentication, and ERC-7739 digest equivalence are proven. Distinguish

@@ -25,9 +25,44 @@ class AgenticPolymarketSetupTests(unittest.TestCase):
         self.assertEqual(data[-64:], hex(100_000)[2:].rjust(64, "0"))
         self.assertNotIn("f" * 64, data)
 
-    def test_legacy_setup_does_not_encode_max_uint_approval(self):
+    def test_deposit_wallet_approval_is_policy_gated(self):
+        # Under the autonomous JIT policy the deposit-wallet approval may be
+        # MaxUint256, but only via the shared policy function gated on the explicit
+        # JIT flag -- never an unconditional unlimited approval literal.
         source = (Path(__file__).parents[1] / "scripts" / "g0_spike.py").read_text()
+        self.assertIn("jit_execution.exchange_approval_units", source)
+        self.assertIn("jit_execution.jit_enabled(env)", source)
         self.assertNotIn("_word(MAX_UINT256)", source)
+
+    def _run_main(self, argv):
+        import io
+        import sys
+        from contextlib import redirect_stdout
+
+        buffer = io.StringIO()
+        with patch.object(sys, "argv", ["agentic_polymarket_setup.py", *argv]):
+            with redirect_stdout(buffer):
+                agentic.main()
+        return buffer.getvalue()
+
+    def test_max_approval_requires_jit_acknowledgement(self):
+        # MaxUint256 is never granted without the caller naming the JIT policy.
+        with self.assertRaises(SystemExit):
+            self._run_main(["--spender", "0x" + "12" * 20, "--max-approval"])
+
+    def test_max_approval_dry_run_encodes_maxuint256(self):
+        payload = json.loads(
+            self._run_main(["--spender", "0x" + "12" * 20, "--max-approval", "--jit"])
+        )
+        self.assertEqual(payload["approval_kind"], "maxuint256_jit_policy")
+        self.assertEqual(payload["approval_units"], (1 << 256) - 1)
+
+    def test_bounded_approval_is_the_default(self):
+        payload = json.loads(
+            self._run_main(["--spender", "0x" + "12" * 20, "--approval-units", "100000"])
+        )
+        self.assertEqual(payload["approval_kind"], "bounded")
+        self.assertEqual(payload["approval_units"], 100_000)
 
     def test_credentials_require_private_permissions(self):
         with tempfile.TemporaryDirectory() as directory:

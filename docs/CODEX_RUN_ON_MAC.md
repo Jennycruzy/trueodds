@@ -64,11 +64,38 @@ RPC from `$SPIKE_POLYGON_RPC_URL`.
   leaves ~2.29 pUSD in the wallet, clear of the 2.5 X Layer bridge floor.
 - Do **not** deploy the deposit wallet — it is already deployed; the script errors
   rather than redeploy.
-- Do **not** touch the exchange allowance in this step — that is a separate
-  MaxUint256 question, unaffected by the sweep.
+- The sweep step itself does not change the exchange allowance; the approval is the
+  next step (below), now that the JIT policy is decided.
 
-## If it passes
+## If it passes: the autonomous JIT approval (policy decided 2026-07-23)
 
-Report back and the JIT wrapper (`fund → approve(max) → trade → sweep`) gets wired
-into `scripts/polymarket_agent_helper.py`. The order-signing adapter remains the
-separate, pre-existing blocker.
+The sweep proves the withdrawal leg. The remaining approval leg is now sanctioned:
+grant `MaxUint256` and keep the wallet at ~0 between trades. It is an explicit,
+gated opt-in (`scripts/jit_execution.py`).
+
+```bash
+# dry run — confirms approval_kind=maxuint256_jit_policy, no broadcast
+python scripts/agentic_polymarket_setup.py \
+  --spender 0xE111180000d2663C0091e4f400237545B87B996B \
+  --max-approval --jit
+
+# live — grants the MaxUint256 allowance from the deposit wallet via the relayer
+python scripts/agentic_polymarket_setup.py \
+  --spender 0xE111180000d2663C0091e4f400237545B87B996B \
+  --max-approval --jit --execute
+```
+
+`--max-approval` without `--jit` is refused by design. The full autonomous cycle is
+then `fund exact notional → approve(MaxUint256) once → sign+submit → sweep unspent
+→ idle at ~0`; `SPIKE_JIT_MAX_APPROVAL=1` selects tight funding + MaxUint256 in the
+`g0_spike.py` deposit-wallet setup path.
+
+## The one remaining gate before a live BUY
+
+The **order-signing adapter** (Agentic Wallet POLY_1271 / ERC-1271 / ERC-7739) is
+still uncertified — the primitives pass (eip712 sign, L2 creds, HMAC, ERC-7739
+digest match) but no order has been accepted through the Agentic Wallet backend.
+A live BUY needs: this approval **and** a tiny rest-and-cancel order accepted and
+cancelled through the adapter. Approval alone does not enable trading. Do not mark
+`okx_agentic_wallet` executable until that rest-and-cancel is recorded in
+`docs/evidence/`.

@@ -33,9 +33,8 @@ from pathlib import Path
 # loading, word encoders, and the verified constants) rather than re-deriving it.
 import agentic_polymarket_setup as setup
 
-# ERC-20 selectors. transfer(address,uint256) is the standard 0xa9059cbb; this is
-# the only difference from the approval batch, which uses 0x095ea7b3.
-TRANSFER_SELECTOR = "0xa9059cbb"
+# The sweep calldata (ERC-20 transfer) comes from the shared JIT policy module so
+# it can never drift from the approval/transfer encoders used elsewhere.
 BALANCE_OF_SELECTOR = "0x70a08231"
 
 # 0.1 pUSD at 6 decimals. Small enough to be a throwaway de-risk, large enough to
@@ -104,7 +103,7 @@ def sweep(*, builder_creds_path: Path, to: str, amount_units: int, rpc_url: str)
     call = DepositWalletCall(
         target=setup.PUSD,
         value="0",
-        data=TRANSFER_SELECTOR + setup._word_address(to) + setup._word_uint(amount_units),
+        data=setup._load_jit().erc20_transfer_data(to, amount_units),
     )
     response = relayer.execute_deposit_wallet_batch(
         [call], setup.DEPOSIT_WALLET, str(nonce_payload["nonce"]), deadline
