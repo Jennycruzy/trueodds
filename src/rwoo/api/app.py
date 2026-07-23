@@ -57,6 +57,7 @@ from rwoo.api.schemas import (
     SignalResponse,
     PrepareExecutionRequest,
     SubmitExecutionRequest,
+    SubmitSignedExecutionRequest,
     ExecutionResponse,
 )
 from rwoo.api import services
@@ -70,6 +71,12 @@ from rwoo.expansion_coverage import (
 from rwoo.scanner import ECONOMICS_SERIES, SPORTS_SERIES, WEATHER_SERIES, evaluate_market
 from rwoo.sports_coverage import SPORTS_COVERAGE, sports_scan_summary
 from rwoo.execution import ExecutionCoordinator, ExecutionError, ExecutionStore
+from rwoo.adapters.polymarket import COLLATERAL, funding_routes
+from rwoo.signed_relay import (
+    decode_signed_order,
+    relay_signed_order,
+    validate_signed_order_matches_intent,
+)
 
 REQUEST_ID_HEADER = "X-Request-ID"
 IDEMPOTENCY_HEADER = "Idempotency-Key"
@@ -82,6 +89,7 @@ _IDEMPOTENT_ROUTES = {
     ("POST", "/v1/check-market"),
     ("POST", "/v1/cross-venue-edge"),
     ("POST", "/v1/executions/prepare"),
+    ("POST", "/v1/executions/{intent_id}/submit-signed"),
 }
 
 _SECURITY_HEADERS = {
@@ -104,6 +112,78 @@ _SERVICE_DESCRIPTION = {
 }
 
 _PROBABILITY_BANDS = tuple(f"{index / 10:.1f}-{(index + 1) / 10:.1f}" for index in range(10))
+
+
+def _execution_client_package(intent: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    base_url = settings.api_base_url.rstrip("/")
+    submit_url = f"{base_url}/v1/executions/{intent['intent_id']}/submit-signed"
+    return {
+        "mode": "caller_side_signed",
+        "custody": "caller keeps signing authority and funds; ASP receives only signed order bytes and L2 headers",
+        "target_collateral": {
+            "chain": "eip155:137",
+            **COLLATERAL,
+        },
+        "wallet_backends": [
+            {
+                "id": "okx_agentic_wallet",
+                "status": "funding_ready_order_signing_adapter_pending",
+                "auth": "email_or_api_key_session",
+                "requires_private_key_env": False,
+                "capabilities": [
+                    "evm_address",
+                    "evm_contract_call",
+                    "evm_token_transfer",
+                    "cross_chain_execute",
+                    "eip712_sign_message",
+                ],
+                "note": (
+                    "normal ASP agents can use an authenticated OKX Agentic Wallet "
+                    "session for funding; Polymarket POLY_1271 order signing still "
+                    "needs a verified Agentic Wallet signer adapter"
+                ),
+            },
+            {
+                "id": "local_private_key",
+                "status": "executable",
+                "auth": "local_env_private_key",
+                "requires_private_key_env": True,
+                "capabilities": [
+                    "evm_address",
+                    "evm_contract_call",
+                    "evm_token_transfer",
+                    "polymarket_l2_headers",
+                    "poly_1271_order_sign",
+                ],
+                "note": "developer fallback used by the live spike and offline tests",
+            },
+        ],
+        "funding_routes": funding_routes(),
+        "submit_signed": {
+            "method": "POST",
+            "url": submit_url,
+            "body": {"body_base64": "<exact Polymarket /order bytes>", "headers": "<caller L2 headers>"},
+        },
+        "helper": {
+            "package": "scripts/polymarket_agent_helper.py",
+            "one_flow_local_key": (
+                "python scripts/polymarket_agent_helper.py --intent-file <prepared.json> "
+                f"--asp-url {base_url} --wallet-backend local-private-key --execute"
+            ),
+            "funding_plan_agentic_wallet": (
+                "python scripts/polymarket_agent_helper.py --intent-file <prepared.json> "
+                "--wallet-backend okx-agentic-wallet --funding-plan --source-asset xlayer-usdt"
+            ),
+            "local_secret_boundary": "private key material, if any exists, stays inside the caller-side wallet backend",
+        },
+    }
+
+
+def _enrich_execution(intent: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    enriched = copy.deepcopy(intent)
+    if enriched.get("venue") == "polymarket":
+        enriched["client_execution"] = _execution_client_package(enriched, settings)
+    return enriched
 
 
 def _validate_calibration_scope(
@@ -928,7 +1008,7 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
                 "execution intent does not match an actionable check-market decision receipt",
             )
         intent, _ = _execution_call(lambda: request.app.state.execution.prepare(body.model_dump(), key))
-        return intent
+        return _enrich_execution(intent, settings)
 
     @app.post(
         "/v1/executions/{intent_id}/submit", response_model=ExecutionResponse, tags=["execution"],
@@ -936,9 +1016,28 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         responses={403: {"model": ErrorEnvelope}, 423: {"model": ErrorEnvelope}},
     )
     async def submit_execution(intent_id: str, request: Request, body: SubmitExecutionRequest):
-        return _execution_call(lambda: request.app.state.execution.submit(
+        intent = _execution_call(lambda: request.app.state.execution.submit(
             intent_id, body.operator_approval_id,
         ))
+        return _enrich_execution(intent, settings)
+
+    @app.post(
+        "/v1/executions/{intent_id}/submit-signed", response_model=ExecutionResponse, tags=["execution"],
+        summary="Relay a caller-signed Polymarket order without receiving a private key",
+        responses={409: {"model": ErrorEnvelope}, 422: {"model": ErrorEnvelope}, 502: {"model": ErrorEnvelope}},
+    )
+    async def submit_signed_execution(intent_id: str, request: Request, body: SubmitSignedExecutionRequest):
+        payload = _execution_call(lambda: decode_signed_order(body.body_base64, body.headers))
+        intent = request.app.state.execution.store.get(intent_id)
+        if intent is None:
+            raise OracleError("EXECUTION_NOT_FOUND", "execution intent was not found")
+        _execution_call(lambda: validate_signed_order_matches_intent(intent, payload))
+        intent = _execution_call(lambda: request.app.state.execution.submit_signed(
+            intent_id,
+            payload.body_hash,
+            lambda _intent: relay_signed_order(payload),
+        ))
+        return _enrich_execution(intent, settings)
 
     @app.get(
         "/v1/executions/{intent_id}", response_model=ExecutionResponse, tags=["execution"],
@@ -948,21 +1047,23 @@ def _register_routes(app: FastAPI, settings: Settings) -> None:
         intent = request.app.state.execution.store.get(intent_id)
         if intent is None:
             raise OracleError("EXECUTION_NOT_FOUND", "execution intent was not found")
-        return intent
+        return _enrich_execution(intent, settings)
 
     @app.post(
         "/v1/executions/{intent_id}/cancel", response_model=ExecutionResponse, tags=["execution"],
         summary="Cancel an unsubmitted intent or request venue cancellation",
     )
     async def cancel_execution(intent_id: str, request: Request):
-        return _execution_call(lambda: request.app.state.execution.cancel(intent_id))
+        intent = _execution_call(lambda: request.app.state.execution.cancel(intent_id))
+        return _enrich_execution(intent, settings)
 
     @app.post(
         "/v1/executions/{intent_id}/reconcile", response_model=ExecutionResponse, tags=["execution"],
         summary="Resolve an ambiguous or nonterminal order state from the venue",
     )
     async def reconcile_execution(intent_id: str, request: Request):
-        return _execution_call(lambda: request.app.state.execution.reconcile(intent_id))
+        intent = _execution_call(lambda: request.app.state.execution.reconcile(intent_id))
+        return _enrich_execution(intent, settings)
 
     @app.get(
         "/v1/calibration", response_model=CalibrationResponse,

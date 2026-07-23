@@ -142,6 +142,19 @@ class SubmitExecutionRequest(_StrictModel):
     operator_approval_id: str = Field(..., min_length=1, max_length=200)
 
 
+class SubmitSignedExecutionRequest(_StrictModel):
+    body_base64: str = Field(
+        ...,
+        min_length=1,
+        max_length=20000,
+        description="Base64 of the exact serialized Polymarket /order body signed by the caller.",
+    )
+    headers: dict[str, str] = Field(
+        ...,
+        description="Caller-computed Polymarket L2 headers. Never include a private key.",
+    )
+
+
 # ----------------------------- responses ----------------------------------
 
 

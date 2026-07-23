@@ -1,6 +1,6 @@
 # Post-ASP Handoff: Mainnet Listing Acceptance
 
-Last updated: 2026-07-21 (listing-stable execution architecture; dated
+Last updated: 2026-07-23 (listing-stable execution architecture; dated
 production facts below retain their original audit dates)
 
 The callable natural-language signal layer is deployed on `trueodd.xyz`, and
@@ -12,6 +12,13 @@ The Agentic Wallet logged in by email is the receiving wallet and the buyer-side
 TEE signer. Its X Layer address is already the configured `payTo` recipient.
 That wallet session is distinct from the server-to-broker authentication used
 by the OKX seller SDK during payment verification and settlement.
+
+Important execution status as of 2026-07-23: the Polymarket caller-signed relay
+path has been live-proven with a local private-key spike, but the normal
+OKX Agentic Wallet email-session backend is not yet certified for Polymarket
+order signing. Agentic Wallet funding/bridge operations are the intended caller
+path; the remaining work is to prove CLOB L2 credential creation and POLY_1271
+order signing through that wallet session without a raw private key.
 
 The reviewed external data, backtesting, research-agent, and Polymarket
 execution repositories are classified in
@@ -43,8 +50,10 @@ credential variables directly on the VPS. Do not send them through chat. Then:
    is not the payment asset.
 5. From that separate client, prove unpaid request -> valid HTTP 402 -> explicitly
    confirmed payment -> HTTP 200 oracle response.
-6. Keep the private key only in the buyer's local environment; never copy it to
-   the VPS, repository, request body, logs, or chat.
+6. If testing a raw-key buyer backend, keep the private key only in the buyer's
+   local environment; never copy it to the VPS, repository, request body, logs,
+   or chat. If testing OKX Agentic Wallet, use the local OnchainOS email/API-key
+   session instead and do not create a private-key `.env`.
 7. Confirm settlement to the recipient and prove the authorization cannot be replayed.
 8. Confirm the paid response creates a linked oracle receipt.
 9. Run external health, OpenAPI, docs, TLS, and rollback smoke tests.
@@ -121,12 +130,19 @@ kill switch.
 - [ ] Domain, HTTPS, nginx, systemd, UFW, health, and rollback are verified.
 - [ ] Other VPS tenants remain healthy.
 - [ ] OKX listing fields and URLs are ready.
-- [ ] Execution remains disabled.
+- [ ] Execution remains disabled for server-side funded submission.
+- [ ] `submit-signed` relay remains non-custodial: callers send signed bytes +
+      headers only; no private key, wallet export, email OTP, or CLOB secret is
+      accepted by the ASP.
+- [ ] OKX Agentic Wallet backend has a live test record before being advertised
+      as executable: email login -> wallet address -> tiny funding route -> pUSD
+      credit -> POLY_1271 order signature -> `submit-signed` -> rest/cancel.
 
 ## Genuine next starting point
 
 When Claude returns, begin with a read-only code and deployment review. Do not
 immediately approve deployment. Verify its tests, payment implementation, live
-data binding, and security claims first. The first external state-changing step
-after that review is operator-approved domain/DNS configuration; the first money
-step is a deliberately confirmed small end-to-end paid API call.
+data binding, and security claims first. For the execution workstream, the next
+external state-changing test is an OKX Agentic Wallet login in the local
+OnchainOS session, followed by a tiny caller-owned funding/sign/rest/cancel
+test. Do not provide a private key for this path.

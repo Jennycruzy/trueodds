@@ -47,11 +47,12 @@ nothing. Use ``--pick-market`` to see the touch, then price far away from it.
 
 FUNDING
 -------
-Polymarket settles in **bridged** USDC.e on Polygon
-(0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174), not native Circle USDC. Both
-report symbol "USDC" with 6 decimals on the same chain, so this is easy to get
-wrong and silent when you do. The preflight checks the right token, and tells
-you explicitly if your balance is sitting in the wrong one.
+Polymarket CLOB V2 settles in pUSD on Polygon. The direct on-chain onramp wraps
+USDC.e into pUSD. If a caller holds native Polygon USDC or Polygon USDT, the
+caller-side setup can route that token through the caller's own Polymarket bridge
+deposit address, which credits pUSD to the caller's deposit wallet. X Layer USDT
+should be bridged caller-side with OKX/onchainos into that same Polymarket EVM
+deposit address. TrueOdds never receives the funds or the key.
 
 SECRETS
 -------
@@ -71,7 +72,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 ENV_PATH = REPO / ".env.spike"
 
-REQUIRED = ("SPIKE_PRIVATE_KEY", "SPIKE_FUNDER_ADDRESS", "SPIKE_TOKEN_ID")
+REQUIRED = ("SPIKE_PRIVATE_KEY", "SPIKE_TOKEN_ID")
 SECRET_KEYS = ("SPIKE_PRIVATE_KEY",)
 
 
@@ -102,9 +103,31 @@ def load_env() -> dict[str, str]:
         env[key.strip()] = value.strip()
 
     missing = [k for k in REQUIRED if not env.get(k)]
+    sig_type = int(env.get("SPIKE_SIGNATURE_TYPE", "0") or "0")
+    if sig_type != 3 and not env.get("SPIKE_FUNDER_ADDRESS"):
+        missing.append("SPIKE_FUNDER_ADDRESS")
     if missing:
         die(f"{ENV_PATH.name} is missing: {', '.join(missing)}")
+    if sig_type == 3 and not env.get("SPIKE_FUNDER_ADDRESS"):
+        env["SPIKE_FUNDER_ADDRESS"] = derive_deposit_wallet_address(env)
     return env
+
+
+def derive_deposit_wallet_address(env: dict[str, str]) -> str:
+    """Derive the POLY_1271 deposit wallet address from the owner key."""
+    from py_builder_relayer_client.client import RelayClient
+
+    chain_id = int(env.get("SPIKE_CHAIN_ID", "137"))
+    relayer_url = env.get("SPIKE_RELAYER_URL", "https://relayer-v2.polymarket.com")
+    relayer = RelayClient(
+        relayer_url,
+        chain_id,
+        env["SPIKE_PRIVATE_KEY"],
+        rpc_url=env.get("SPIKE_POLYGON_RPC_URL"),
+    )
+    address = relayer.get_expected_deposit_wallet()
+    ok(f"derived deposit wallet funder {address}")
+    return address
 
 
 def die(message: str) -> None:
@@ -163,6 +186,16 @@ POLYGON_RPCS = (
 SEL_BALANCE_OF = "0x70a08231"   # balanceOf(address)
 SEL_ALLOWANCE = "0xdd62ed3e"    # allowance(address,address)
 SEL_APPROVE = "0x095ea7b3"      # approve(address,uint256)
+SEL_TRANSFER = "0xa9059cbb"     # transfer(address,uint256)
+SEL_WRAP = "0x62355638"         # wrap(address,address,uint256)
+
+USDCE_COLLATERAL = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+NATIVE_USDC_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+POLYGON_USDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+COLLATERAL_ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+POLYMARKET_BRIDGE_BASE_URL = "https://bridge.polymarket.com"
+POLYMARKET_BRIDGE_MIN_UNITS = 2_500_000
+MAX_UINT256 = (1 << 256) - 1
 
 USDC_DECIMALS = 6
 
@@ -207,14 +240,15 @@ def chain_preflight(env: dict[str, str], required_units: int, spender: str,
 
     Returns True when the wallet is ready to have an order accepted.
     """
-    from rwoo.adapters.polymarket import COLLATERAL, NATIVE_USDC_NOT_COLLATERAL
+    from rwoo.adapters.polymarket import NATIVE_USDC_NOT_COLLATERAL
 
     owner = env["SPIKE_FUNDER_ADDRESS"]
-    token = COLLATERAL["address"]
+    collateral = collateral_config(env)
+    token = collateral["address"]
 
     step("0", "PREFLIGHT: on-chain balances and allowance")
     print(f"   owner    {owner}")
-    print(f"   token    {token}  ({COLLATERAL['name']})")
+    print(f"   token    {token}  ({collateral['name']})")
     print(f"   spender  {spender}")
 
     gas_raw = int(_rpc("eth_getBalance", [owner, "latest"]), 16)
@@ -227,11 +261,13 @@ def chain_preflight(env: dict[str, str], required_units: int, spender: str,
     ready = True
     print()
     print(f"   POL (gas)          {gas:.4f}" + ("" if gas > 0.05 else "   <-- low"))
-    if gas <= 0.005:
+    if int(env.get("SPIKE_SIGNATURE_TYPE", "0") or "0") == 3:
+        ok("POL is not required in the deposit wallet; relayer handles wallet batches")
+    elif gas <= 0.005:
         warn("not enough POL to send an approval transaction")
         ready = False
 
-    print(f"   collateral balance {_units(bal_raw)} {COLLATERAL['symbol']}")
+    print(f"   collateral balance {_units(bal_raw)} {collateral['symbol']}")
     if bal_raw == 0:
         # The single most likely funding mistake, so name it precisely.
         wrong_raw = int(_rpc("eth_call", [
@@ -241,13 +277,13 @@ def chain_preflight(env: dict[str, str], required_units: int, spender: str,
             warn(f"you hold {_units(wrong_raw)} of NATIVE USDC ({NATIVE_USDC_NOT_COLLATERAL}).")
             warn("Polymarket does not settle in that token. Swap or bridge to the address above.")
         else:
-            warn("collateral balance is zero; fund the address above with bridged USDC.e")
+            warn(f"collateral balance is zero; fund the address above with {collateral['symbol']}")
         ready = False
     elif bal_raw < required_units:
         warn(f"balance {_units(bal_raw)} is below the order notional {_units(required_units)}")
         ready = False
 
-    print(f"   allowance          {_units(allow_raw)} {COLLATERAL['symbol']}")
+    print(f"   allowance          {_units(allow_raw)} {collateral['symbol']}")
     if allow_raw < required_units:
         if not approve:
             warn(f"allowance below the {_units(required_units)} needed. Re-run with --approve to set it.")
@@ -258,6 +294,21 @@ def chain_preflight(env: dict[str, str], required_units: int, spender: str,
         ok("allowance is sufficient")
 
     return ready
+
+
+def collateral_config(env: dict[str, str]) -> dict[str, str | int]:
+    if int(env.get("SPIKE_SIGNATURE_TYPE", "0") or "0") == 3:
+        from py_clob_client_v2.config import get_contract_config
+
+        cfg = get_contract_config(int(env.get("SPIKE_CHAIN_ID", "137")))
+        return {
+            "address": cfg.collateral,
+            "symbol": "pUSD",
+            "name": "Polymarket USD collateral",
+            "decimals": 6,
+        }
+    from rwoo.adapters.polymarket import COLLATERAL
+    return COLLATERAL
 
 
 def _send_approval(env: dict[str, str], token: str, spender: str, required_units: int) -> bool:
@@ -313,6 +364,284 @@ def _send_approval(env: dict[str, str], token: str, spender: str, required_units
     return False
 
 
+def _send_token_transfer(env: dict[str, str], token: str, to: str, amount: int) -> bool:
+    return _send_eoa_contract_call(
+        env,
+        token,
+        SEL_TRANSFER + _word(to) + _word(amount),
+        f"transferring {_units(amount)} token units to {to}",
+        "transfer",
+    )
+
+
+def _send_eoa_approval(env: dict[str, str], token: str, spender: str, amount: int,
+                       *, label: str = "approval") -> bool:
+    return _send_eoa_contract_call(
+        env,
+        token,
+        SEL_APPROVE + _word(spender) + _word(amount),
+        f"approving {_units(amount)} for {spender}",
+        label,
+    )
+
+
+def _wrap_usdce_to_pusd(env: dict[str, str], to: str, amount: int) -> bool:
+    from eth_account import Account
+
+    step("0c", f"SETUP: wrapping {_units(amount)} USDC.e to pUSD")
+    allowance = int(_rpc("eth_call", [
+        {"to": USDCE_COLLATERAL, "data": SEL_ALLOWANCE + _word(Account.from_key(env["SPIKE_PRIVATE_KEY"]).address) + _word(COLLATERAL_ONRAMP)},
+        "latest",
+    ]) or "0x0", 16)
+    if allowance < amount and not _send_eoa_approval(
+        env, USDCE_COLLATERAL, COLLATERAL_ONRAMP, amount, label="onramp approval"
+    ):
+        return False
+    return _send_eoa_contract_call(
+        env,
+        COLLATERAL_ONRAMP,
+        SEL_WRAP + _word(USDCE_COLLATERAL) + _word(to) + _word(amount),
+        f"wrapping {_units(amount)} USDC.e into pUSD for deposit wallet",
+        "wrap",
+    )
+
+
+def _polymarket_bridge_deposit_address(env: dict[str, str], wallet: str) -> str:
+    import httpx
+
+    bridge_host = env.get("SPIKE_POLYMARKET_BRIDGE_HOST", POLYMARKET_BRIDGE_BASE_URL).rstrip("/")
+    headers = {"Content-Type": "application/json", "User-Agent": "trueodds-polymarket-agent-helper/0"}
+    builder_code = env.get("SPIKE_BUILDER_CODE")
+    if builder_code:
+        headers["X-Builder-Code"] = builder_code
+    step("0c", "SETUP: requesting caller-owned Polymarket bridge address")
+    with httpx.Client(timeout=30) as client:
+        response = client.post(f"{bridge_host}/deposit", json={"address": wallet}, headers=headers)
+    response.raise_for_status()
+    payload = response.json()
+    evm = (payload.get("address") or {}).get("evm")
+    if not isinstance(evm, str) or not evm.startswith("0x"):
+        die(f"Polymarket bridge did not return an EVM deposit address: {payload}")
+    ok(f"Polymarket EVM deposit address {evm}")
+    return evm
+
+
+def _polymarket_bridge_quote(env: dict[str, str], source_token: str, to: str, amount: int) -> dict:
+    import httpx
+
+    bridge_host = env.get("SPIKE_POLYMARKET_BRIDGE_HOST", POLYMARKET_BRIDGE_BASE_URL).rstrip("/")
+    token = collateral_config(env)["address"]
+    payload = {
+        "fromAmountBaseUnit": str(amount),
+        "fromChainId": env.get("SPIKE_CHAIN_ID", "137"),
+        "fromTokenAddress": source_token,
+        "recipientAddress": to,
+        "toChainId": "137",
+        "toTokenAddress": token,
+    }
+    with httpx.Client(timeout=30, headers={"User-Agent": "trueodds-polymarket-agent-helper/0"}) as client:
+        response = client.post(f"{bridge_host}/quote", json=payload, headers={"Content-Type": "application/json"})
+    if response.status_code >= 400:
+        warn(f"Polymarket bridge quote failed with HTTP {response.status_code}: {response.text[:240]}")
+        return {}
+    result = response.json()
+    ok(f"Polymarket bridge quote accepted for {_units(amount)} source units")
+    return result
+
+
+def _wait_for_wallet_pusd(env: dict[str, str], wallet: str, required_units: int, label: str) -> bool:
+    import time
+
+    token = collateral_config(env)["address"]
+    timeout = int(env.get("SPIKE_FUNDING_POLL_SECONDS", "300") or "300")
+    deadline = time.time() + timeout
+    step("0c", f"SETUP: waiting for pUSD credit after {label}")
+    while True:
+        balance = int(_rpc("eth_call", [{"to": token, "data": SEL_BALANCE_OF + _word(wallet)}, "latest"]) or "0x0", 16)
+        print(f"   deposit wallet pUSD {_units(balance)} / {_units(required_units)} required")
+        if balance >= required_units:
+            ok("deposit wallet pUSD is sufficient")
+            return True
+        if time.time() >= deadline:
+            warn("pUSD credit not observed before timeout; bridge may still be processing")
+            return False
+        time.sleep(10)
+
+
+def _fund_with_polymarket_bridge(env: dict[str, str], source_token: str, symbol: str,
+                                 wallet: str, required_units: int, amount: int) -> bool:
+    bridge_amount = max(amount, POLYMARKET_BRIDGE_MIN_UNITS)
+    step("0c", f"SETUP: routing {_units(bridge_amount)} {symbol} through Polymarket bridge")
+    bridge_address = _polymarket_bridge_deposit_address(env, wallet)
+    _polymarket_bridge_quote(env, source_token, wallet, bridge_amount)
+    if not _send_token_transfer(env, source_token, bridge_address, bridge_amount):
+        return False
+    return _wait_for_wallet_pusd(env, wallet, required_units, f"{symbol} bridge deposit")
+
+
+def _send_eoa_contract_call(env: dict[str, str], to: str, data: str, title: str, label: str) -> bool:
+    from eth_account import Account
+
+    account = Account.from_key(env["SPIKE_PRIVATE_KEY"])
+    step("0c", f"SETUP: {title}")
+    nonce = int(_rpc("eth_getTransactionCount", [account.address, "pending"]), 16)
+    base_fee = int(_rpc("eth_gasPrice", []), 16)
+    tx = {
+        "to": to,
+        "value": 0,
+        "gas": 180_000,
+        "maxFeePerGas": base_fee * 2,
+        "maxPriorityFeePerGas": min(base_fee, 30_000_000_000),
+        "nonce": nonce,
+        "chainId": int(env.get("SPIKE_CHAIN_ID", "137")),
+        "data": data,
+    }
+    signed = Account.sign_transaction(tx, account.key)
+    raw = signed.raw_transaction.hex()
+    tx_hash = _rpc("eth_sendRawTransaction", ["0x" + raw.removeprefix("0x")])
+    ok(f"{label} submitted: {tx_hash}")
+    return _wait_for_receipt(tx_hash, label)
+
+
+def _wait_for_receipt(tx_hash: str, label: str) -> bool:
+    import time
+
+    print("   waiting for confirmation…")
+    for _ in range(40):
+        time.sleep(3)
+        receipt = _rpc("eth_getTransactionReceipt", [tx_hash])
+        if receipt:
+            if int(receipt.get("status", "0x0"), 16) == 1:
+                ok(f"{label} confirmed")
+                return True
+            die(f"{label} transaction reverted: {tx_hash}")
+    warn(f"{label} not confirmed within 2 minutes; check the hash before continuing")
+    return False
+
+
+def setup_deposit_wallet(env: dict[str, str], required_units: int, spender: str) -> bool:
+    """Autonomously prepare the POLY_1271 deposit wallet for the spike."""
+    from py_builder_relayer_client.client import RelayClient
+    from py_builder_relayer_client.models import DepositWalletCall, TransactionType
+    from py_builder_signing_sdk.config import BuilderApiKeyCreds, BuilderConfig
+    from py_clob_client_v2 import AssetType, BalanceAllowanceParams, ClobClient
+
+    if int(env.get("SPIKE_SIGNATURE_TYPE", "0") or "0") != 3:
+        die("--setup-deposit-wallet requires SPIKE_SIGNATURE_TYPE=3")
+
+    chain_id = int(env.get("SPIKE_CHAIN_ID", "137"))
+    host = env.get("SPIKE_CLOB_HOST", "https://clob.polymarket.com")
+    relayer_url = env.get("SPIKE_RELAYER_URL", "https://relayer-v2.polymarket.com")
+    owner_client = ClobClient(host=host, chain_id=chain_id, key=env["SPIKE_PRIVATE_KEY"])
+    owner_creds = owner_client.create_or_derive_api_key()
+    owner_client.set_api_creds(owner_creds)
+    builder_creds = owner_client.create_builder_api_key()
+    builder_config = BuilderConfig(local_builder_creds=BuilderApiKeyCreds(
+        key=builder_creds["key"],
+        secret=builder_creds["secret"],
+        passphrase=builder_creds["passphrase"],
+    ))
+    relayer = RelayClient(
+        relayer_url,
+        chain_id,
+        env["SPIKE_PRIVATE_KEY"],
+        builder_config,
+        rpc_url=env.get("SPIKE_POLYGON_RPC_URL"),
+    )
+    wallet = env["SPIKE_FUNDER_ADDRESS"]
+    if wallet.lower() != relayer.get_expected_deposit_wallet().lower():
+        die("SPIKE_FUNDER_ADDRESS does not match the derived deposit wallet")
+
+    step("0a", "SETUP: deploy deposit wallet if needed")
+    if relayer.get_deployed(wallet, TransactionType.WALLET.value):
+        ok("deposit wallet already deployed")
+    else:
+        response = relayer.deploy_deposit_wallet()
+        ok(f"wallet deployment submitted: {response.transaction_id}")
+        confirmed = response.wait()
+        if not confirmed:
+            die("deposit wallet deployment did not confirm")
+        ok("deposit wallet deployed")
+
+    token = collateral_config(env)["address"]
+    owner = owner_client.get_address()
+    target_units = required_units * 4
+    wallet_balance = int(_rpc("eth_call", [{"to": token, "data": SEL_BALANCE_OF + _word(wallet)}, "latest"]) or "0x0", 16)
+    if wallet_balance < required_units:
+        transfer_units = max(target_units - wallet_balance, required_units - wallet_balance)
+        eoa_pusd = int(_rpc("eth_call", [{"to": token, "data": SEL_BALANCE_OF + _word(owner)}, "latest"]) or "0x0", 16)
+        if eoa_pusd >= transfer_units:
+            if not _send_token_transfer(env, token, wallet, transfer_units):
+                return False
+        else:
+            eoa_usdce = int(_rpc("eth_call", [{"to": USDCE_COLLATERAL, "data": SEL_BALANCE_OF + _word(owner)}, "latest"]) or "0x0", 16)
+            if eoa_usdce >= transfer_units:
+                if not _wrap_usdce_to_pusd(env, wallet, transfer_units):
+                    return False
+            else:
+                bridge_sources = [
+                    ("USDC", NATIVE_USDC_POLYGON),
+                    ("USDT", POLYGON_USDT),
+                ]
+                balances = []
+                funded = False
+                for symbol, address in bridge_sources:
+                    raw = int(_rpc("eth_call", [{"to": address, "data": SEL_BALANCE_OF + _word(owner)}, "latest"]) or "0x0", 16)
+                    balances.append(f"{symbol} {_units(raw)}")
+                    if raw >= POLYMARKET_BRIDGE_MIN_UNITS:
+                        if not _fund_with_polymarket_bridge(env, address, symbol, wallet, required_units, transfer_units):
+                            return False
+                        funded = True
+                        break
+                if not funded:
+                    die(
+                        f"EOA pUSD {_units(eoa_pusd)}, USDC.e {_units(eoa_usdce)}, "
+                        f"and bridgeable Polygon balances ({', '.join(balances)}) are below setup need. "
+                        "For X Layer USDT, run scripts/polymarket_agent_helper.py "
+                        "--funding-plan --source-asset xlayer-usdt and execute that route locally."
+                    )
+    else:
+        ok("deposit wallet collateral is sufficient")
+
+    allowance = int(_rpc("eth_call", [
+        {"to": token, "data": SEL_ALLOWANCE + _word(wallet) + _word(spender)}, "latest"
+    ]) or "0x0", 16)
+    if allowance >= required_units:
+        ok("deposit wallet allowance is sufficient")
+    else:
+        step("0d", "SETUP: approving exchange from deposit wallet via relayer")
+        nonce_payload = relayer.get_nonce(owner, TransactionType.WALLET.value)
+        nonce = str(nonce_payload.get("nonce"))
+        import time
+        deadline = str(int(time.time()) + 900)
+        call = DepositWalletCall(
+            target=token,
+            value="0",
+            data=SEL_APPROVE + _word(spender) + _word(MAX_UINT256),
+        )
+        response = relayer.execute_deposit_wallet_batch([call], wallet, nonce, deadline)
+        ok(f"approval batch submitted: {response.transaction_id}")
+        confirmed = response.wait()
+        if not confirmed:
+            die("deposit wallet approval batch did not confirm")
+        ok("deposit wallet approval confirmed")
+
+    step("0e", "SETUP: sync CLOB deposit-wallet balance cache")
+    trading_client = ClobClient(
+        host=host,
+        chain_id=chain_id,
+        key=env["SPIKE_PRIVATE_KEY"],
+        creds=owner_creds,
+        signature_type=3,
+        funder=wallet,
+    )
+    result = trading_client.update_balance_allowance(
+        BalanceAllowanceParams(asset_type=AssetType.COLLATERAL)
+    )
+    ok(f"CLOB balance cache synced: {result}")
+    return True
+
+
 # ---------------------------------------------------------------- discovery
 
 
@@ -366,6 +695,9 @@ def caller_stage(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
     host = env.get("SPIKE_CLOB_HOST", "https://clob.polymarket.com")
     sig_type = int(env.get("SPIKE_SIGNATURE_TYPE", "0"))
 
+    if sig_type == 3:
+        return caller_stage_poly_1271(env)
+
     step("1", "CALLER: initialise client with the throwaway key (L1)")
     kwargs = {"key": env["SPIKE_PRIVATE_KEY"], "chain_id": chain_id}
     if sig_type != 0:
@@ -385,15 +717,122 @@ def caller_stage(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
         if hasattr(creds, name)
     ))
 
-    step("3", "CALLER: build and sign the order struct (L1 signature)")
-    side = BUY if env.get("SPIKE_SIDE", "BUY").upper() == "BUY" else SELL
-    order = client.create_order(OrderArgs(
-        token_id=env["SPIKE_TOKEN_ID"],
-        price=float(env.get("SPIKE_PRICE", "0.02")),
-        size=float(env.get("SPIKE_SIZE", "5")),
-        side=side,
-    ))
-    ok("order signed locally; the private key never leaves this function")
+    step("3", "CALLER: build and sign the order struct (V3 patched)")
+
+    # ---------------------------------------------------------------
+    # Polymarket migrated to a new EIP-712 order struct (V2/V3).
+    # The old struct had: salt, maker, signer, taker, tokenId,
+    # makerAmount, takerAmount, expiration, nonce, feeRateBps, side,
+    # signatureType.
+    #
+    # The new struct is:
+    #   Order(uint256 salt, address maker, address signer,
+    #         uint256 tokenId, uint256 makerAmount, uint256 takerAmount,
+    #         uint8 side, uint8 signatureType, uint256 timestamp,
+    #         bytes32 metadata, bytes32 builder)
+    #
+    # Removed: taker, expiration, nonce, feeRateBps.
+    # Added: timestamp, metadata, builder.
+    # Domain version changed from "1" to "2".
+    #
+    # py-clob-client 0.34.6 signs the OLD struct and the venue rejects
+    # it with "invalid order version". We rebuild the signing from
+    # scratch using eth_account's sign_typed_data, matching the new
+    # ts-sdk (Polymarket/ts-sdk packages/client/src/exchange.ts).
+    # ---------------------------------------------------------------
+    import time as _time
+    from eth_account import Account
+    from py_clob_client.order_builder.builder import ROUNDING_CONFIG
+
+    side_const = BUY if env.get("SPIKE_SIDE", "BUY").upper() == "BUY" else SELL
+    price = float(env.get("SPIKE_PRICE", "0.02"))
+    size = float(env.get("SPIKE_SIZE", "5"))
+    token_id = env["SPIKE_TOKEN_ID"]
+
+    # Resolve tick size from the venue.
+    tick_size = client.get_tick_size(token_id)
+    neg_risk = client.get_neg_risk(token_id)
+    fee_rate_bps = client.get_fee_rate_bps(token_id)
+
+    side_int, maker_amount, taker_amount = client.builder.get_order_amounts(
+        side_const, size, price, ROUNDING_CONFIG[tick_size],
+    )
+
+    # Pick exchange contract based on neg_risk.
+    from py_clob_client.order_builder.builder import get_contract_config as _gcc
+    contract_cfg = _gcc(chain_id, neg_risk)
+    exchange_addr = contract_cfg.exchange
+
+    import secrets
+    # The TS SDK uses Number.parseInt(salt, 10) on the wire, which truncates
+    # to a JS-safe integer (2^53). Keep salt within that range.
+    salt = int.from_bytes(secrets.token_bytes(6), "big")
+    timestamp = int(_time.time())
+    account = Account.from_key(env["SPIKE_PRIVATE_KEY"])
+    maker_address = env["SPIKE_FUNDER_ADDRESS"] if sig_type != 0 else account.address
+
+    # Build the V2 EIP-712 typed data and sign it.
+    domain_data = {
+        "name": "Polymarket CTF Exchange",
+        "version": "2",
+        "chainId": chain_id,
+        "verifyingContract": exchange_addr,
+    }
+    order_types = {
+        "Order": [
+            {"name": "salt", "type": "uint256"},
+            {"name": "maker", "type": "address"},
+            {"name": "signer", "type": "address"},
+            {"name": "tokenId", "type": "uint256"},
+            {"name": "makerAmount", "type": "uint256"},
+            {"name": "takerAmount", "type": "uint256"},
+            {"name": "side", "type": "uint8"},
+            {"name": "signatureType", "type": "uint8"},
+            {"name": "timestamp", "type": "uint256"},
+            {"name": "metadata", "type": "bytes32"},
+            {"name": "builder", "type": "bytes32"},
+        ],
+    }
+    order_message = {
+        "salt": salt,
+        "maker": maker_address,
+        "signer": account.address,
+        "tokenId": int(token_id),
+        "makerAmount": int(maker_amount),
+        "takerAmount": int(taker_amount),
+        "side": side_int,
+        "signatureType": sig_type,
+        "timestamp": timestamp,
+        "metadata": b'\x00' * 32,
+        "builder": b'\x00' * 32,
+    }
+
+    signed = account.sign_typed_data(
+        domain_data, order_types, order_message,
+    )
+    signature = signed.signature.hex()
+    if not signature.startswith("0x"):
+        signature = "0x" + signature
+
+    ok(f"order signed with V2 struct; signer={account.address}")
+
+    # Build the wire body matching the new ts-sdk format.
+    # Field set matches Polymarket/ts-sdk createSendOrderPayload exactly.
+    order_dict = {
+        "builder": "0x" + "0" * 64,
+        "expiration": "0",
+        "maker": maker_address,
+        "makerAmount": str(int(maker_amount)),
+        "metadata": "0x" + "0" * 64,
+        "salt": salt,
+        "side": "BUY" if side_int == 0 else "SELL",
+        "signature": signature,
+        "signatureType": sig_type,
+        "signer": account.address,
+        "takerAmount": str(int(taker_amount)),
+        "timestamp": str(timestamp),
+        "tokenId": token_id,
+    }
 
     step("4", "CALLER: serialise ONCE and compute L2 headers over that exact string")
     # THE CRUX OF VARIANT A.
@@ -402,20 +841,10 @@ def caller_stage(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
     # body contribution is a *string*. The server reconstructs that string from
     # the bytes it receives. So the signed string and the posted bytes must be
     # identical, character for character.
-    #
-    # py-clob-client anticipates exactly this: RequestArgs carries an optional
-    # `serialized_body`, and create_level_2_headers prefers it over re-rendering
-    # `body`. post_order then sends `data=request_args.serialized_body`. Sign and
-    # send are the same string by construction — which is the whole of Variant A.
-    #
-    # The separators matter. json.dumps defaults to ", " / ": " and the SDK uses
-    # ",", ":" — signing one and posting the other fails auth and would look
-    # like "the venue rejects relayed orders" when it is really our own bug.
     from py_clob_client.headers.headers import create_level_2_headers
     from py_clob_client.clob_types import OrderType, RequestArgs
-    from py_clob_client.utilities import order_to_json
 
-    body = order_to_json(order, creds.api_key, OrderType.GTC)
+    body = {"order": order_dict, "owner": creds.api_key, "orderType": OrderType.GTC}
     serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
 
     request_args = RequestArgs(
@@ -432,6 +861,75 @@ def caller_stage(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
     ok(f"headers computed by the CALLER: {sorted(headers)}")
 
     return "/order", body_bytes, dict(headers)
+
+
+def caller_stage_poly_1271(env: dict[str, str]) -> tuple[str, bytes, dict[str, str]]:
+    """The deposit-wallet path for new Polymarket API users.
+
+    POLY_1271 orders are not normal EOA EIP-712 order signatures. The CLOB
+    validates them through ERC-1271 on the deposit wallet, and the signature is
+    ERC-7739-wrapped. Use the official v2 client for this shape; hand-building
+    it is exactly how this spike got a false rejection.
+    """
+    from py_clob_client_v2 import (
+        ClobClient,
+        OrderArgs,
+        OrderType,
+        PartialCreateOrderOptions,
+    )
+    from py_clob_client_v2.endpoints import POST_ORDER
+    from py_clob_client_v2.order_utils.model.order_data_v2 import order_to_json_v2
+
+    chain_id = int(env.get("SPIKE_CHAIN_ID", "137"))
+    host = env.get("SPIKE_CLOB_HOST", "https://clob.polymarket.com")
+    deposit_wallet = env["SPIKE_FUNDER_ADDRESS"]
+
+    step("1", "CALLER: initialise v2 client with deposit wallet funder (POLY_1271)")
+    client = ClobClient(
+        host=host,
+        chain_id=chain_id,
+        key=env["SPIKE_PRIVATE_KEY"],
+        signature_type=3,
+        funder=deposit_wallet,
+    )
+    ok(f"owner signer address {client.get_address()}")
+    ok(f"deposit wallet funder {deposit_wallet}")
+
+    step("2", "CALLER: derive L2 credentials from the owner signer")
+    creds = client.create_or_derive_api_key()
+    client.set_api_creds(creds)
+    ok("L2 creds derived: " + ", ".join(
+        f"{name}={redact(name.upper(), str(getattr(creds, name)))}"
+        for name in ("api_key", "api_secret", "api_passphrase")
+        if hasattr(creds, name)
+    ))
+
+    step("3", "CALLER: build POLY_1271 wrapped order with official v2 SDK")
+    token_id = env["SPIKE_TOKEN_ID"]
+    tick_size = client.get_tick_size(token_id)
+    neg_risk = client.get_neg_risk(token_id)
+    order = client.create_order(
+        OrderArgs(
+            token_id=token_id,
+            price=float(env.get("SPIKE_PRICE", "0.02")),
+            size=float(env.get("SPIKE_SIZE", "5")),
+            side=env.get("SPIKE_SIDE", "BUY").upper(),
+        ),
+        PartialCreateOrderOptions(tick_size=tick_size, neg_risk=neg_risk),
+    )
+    ok(f"order signed via v2 SDK; maker={order.maker}; signer={order.signer}; signatureType={int(order.signatureType)}")
+
+    step("4", "CALLER: serialise ONCE and compute L2 headers over that exact string")
+    body = order_to_json_v2(order, creds.api_key or "", OrderType.GTC)
+    serialized = json.dumps(body, separators=(",", ":"), ensure_ascii=False)
+    headers = client._l2_headers("POST", POST_ORDER, body=body, serialized_body=serialized)
+
+    body_bytes = serialized.encode("utf-8")
+    ok(f"body frozen: {len(body_bytes)} bytes, sha256={hashlib.sha256(body_bytes).hexdigest()[:16]}…")
+    ok("HMAC computed over the identical string that will be transmitted")
+    ok(f"headers computed by the CALLER: {sorted(headers)}")
+
+    return POST_ORDER, body_bytes, dict(headers)
 
 
 def relay_stage(host: str, path: str, body_bytes: bytes, headers: dict[str, str],
@@ -506,6 +1004,8 @@ def main() -> None:
                         help="do everything except the POST (default)")
     parser.add_argument("--approve", action="store_true",
                         help="set the ERC-20 allowance if it is short (sends a tx, costs gas)")
+    parser.add_argument("--setup-deposit-wallet", action="store_true",
+                        help="derive/deploy/fund/approve a POLY_1271 deposit wallet")
     parser.add_argument("--skip-preflight", action="store_true",
                         help="skip the on-chain balance/allowance check")
     args = parser.parse_args()
@@ -542,10 +1042,18 @@ def main() -> None:
             response.raise_for_status()
         from datetime import datetime, timezone
         market = _parse_market(response.json(), datetime.now(timezone.utc))
-        spender = EXCHANGE_BY_MARKET_TYPE[bool(market.neg_risk)]["address"]
+        if int(env.get("SPIKE_SIGNATURE_TYPE", "0") or "0") == 3:
+            from py_clob_client_v2.config import get_contract_config
+            v2_cfg = get_contract_config(int(env.get("SPIKE_CHAIN_ID", "137")))
+            spender = v2_cfg.neg_risk_exchange_v2 if market.neg_risk else v2_cfg.exchange_v2
+        else:
+            spender = EXCHANGE_BY_MARKET_TYPE[bool(market.neg_risk)]["address"]
 
         notional = Decimal(env.get("SPIKE_PRICE", "0.02")) * Decimal(env.get("SPIKE_SIZE", "5"))
         required_units = int(notional * (10 ** 6))
+
+        if args.setup_deposit_wallet:
+            setup_deposit_wallet(env, required_units, spender)
 
         ready = chain_preflight(env, required_units, spender, approve=args.approve)
         if not ready and args.live:

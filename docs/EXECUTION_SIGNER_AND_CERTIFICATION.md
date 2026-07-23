@@ -1,6 +1,6 @@
 # Execution Signer & Certification Runbook
 
-Last reviewed: 2026-07-22
+Last reviewed: 2026-07-23
 
 This runbook covers step 2 (isolated signer) and step 3 (reconciliation,
 policy, certification) of the release train in
@@ -16,8 +16,35 @@ Current state (as of last review):
 - Step 1b — coordinator pre-submit validation hook and clean-state contract:
   `ExecutionCoordinator._pre_submit_validate` and the `ExecutionError →
   REJECTED` / other-exception → `UNKNOWN` split in `submit()`.
-- Step 2 — signer: **not started**. No key exists.
+- Step 2 — custodial/operator signer: **not started**. No production key exists.
+- Caller-signed ASP relay: `submit-signed` is implemented and live-proven with a
+  local private-key spike. This is non-custodial because the caller signs and the
+  ASP only relays signed bytes.
+- OKX Agentic Wallet backend: funding/bridge session is the intended normal ASP
+  caller path, but Polymarket L2 credential creation and POLY_1271 order signing
+  through an email/API-key Agentic Wallet session are not yet live-tested.
 - Production `RWOO_EXECUTION_MODE` remains `disabled`.
+
+## 0. Current ASP execution path
+
+This runbook's custodial signer model is not the active product path. The active
+ASP design is **caller-side signed execution assist**:
+
+1. ASP prepares a receipt-bound intent.
+2. Caller agent funds its own Polymarket deposit wallet with pUSD.
+3. Caller agent signs the POLY_1271 CLOB order and creates L2 headers locally.
+4. Caller agent posts only `body_base64 + headers` to
+   `POST /v1/executions/{intent_id}/submit-signed`.
+5. ASP verifies the signed order matches the prepared intent, stores a one-shot
+   body hash for replay protection, and relays byte-identical to Polymarket.
+
+For developer testing, the caller-side helper currently supports a local private
+key backend. For marketplace users, the target backend is OKX Agentic Wallet
+email/API-key session auth. That backend must pass live rest-and-cancel
+certification before it is marked executable. The next test must not use a
+private key; it should log into OnchainOS wallet locally, obtain the wallet EVM
+address, fund with a tiny amount, prove pUSD credit, sign the order, submit, and
+cancel.
 
 ## 1. The signer boundary
 

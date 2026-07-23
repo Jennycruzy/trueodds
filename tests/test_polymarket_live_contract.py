@@ -156,29 +156,41 @@ class SettlementRequirementsTests(unittest.TestCase):
         self.market = _parse_market(load("polymarket_live_market.json"), NOW)
 
     def test_collateral_matches_the_sdk_contract_config(self):
-        # Guards against drift from py-clob-client's get_contract_config(137).
+        # Guards against drift from py-clob-client-v2's get_contract_config(137).
         req = self.build(self.market)
         self.assertEqual(req["collateral"]["address"],
-                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+                         "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
         self.assertEqual(req["collateral"]["decimals"], 6)
         self.assertEqual(req["chain"], "eip155:137")
 
-    def test_native_usdc_is_called_out_as_the_wrong_token(self):
-        from rwoo.adapters.polymarket import NATIVE_USDC_NOT_COLLATERAL
-        warning = self.build(self.market)["collateral"]["warning"]
-        self.assertIn(NATIVE_USDC_NOT_COLLATERAL, warning)
-        self.assertNotEqual(NATIVE_USDC_NOT_COLLATERAL,
-                            self.build(self.market)["collateral"]["address"])
+    def test_usdce_onramp_is_declared_without_custody(self):
+        req = self.build(self.market)
+        self.assertEqual(req["collateral_onramp"]["input_asset"]["address"],
+                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+        self.assertIn("never send funds to TrueOdds", req["collateral"]["warning"])
+
+    def test_common_stablecoin_funding_routes_are_declared(self):
+        req = self.build(self.market)
+        routes = {route["id"]: route for route in req["funding_routes"]}
+        self.assertEqual(routes["polygon-usdce-onramp"]["contract"],
+                         "0x93070a847efEf7F70739046A929D47a521F5B8ee")
+        self.assertEqual(routes["polygon-usdc-bridge"]["source"]["address"],
+                         "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359")
+        self.assertEqual(routes["polygon-usdt-bridge"]["source"]["address"],
+                         "0xc2132D05D31c914a87C6611C10748AEb04B58e8F")
+        self.assertEqual(routes["xlayer-usdt-okx-to-polymarket-bridge"]["source"]["chain"], "eip155:196")
+        self.assertEqual(routes["xlayer-usdt-okx-to-polymarket-bridge"]["destination"],
+                         "caller_poly_1271_deposit_wallet")
 
     def test_allowance_spender_follows_the_market_type(self):
         import dataclasses
         normal = self.build(self.market)["required_allowances"][0]
-        self.assertEqual(normal["role"], "exchange")
-        self.assertEqual(normal["spender"], "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
+        self.assertEqual(normal["role"], "exchange_v2")
+        self.assertEqual(normal["spender"], "0xE111180000d2663C0091e4f400237545B87B996B")
 
         neg = self.build(dataclasses.replace(self.market, neg_risk=True))["required_allowances"][0]
-        self.assertEqual(neg["role"], "neg_risk_exchange")
-        self.assertEqual(neg["spender"], "0xC5d563A36AE78145C45a50134d48A1215220f80a")
+        self.assertEqual(neg["role"], "neg_risk_exchange_v2")
+        self.assertEqual(neg["spender"], "0xe2222d279d744050d28e00520010520000310F59")
         self.assertNotEqual(normal["spender"], neg["spender"])
 
     def test_notional_is_rendered_canonically_when_supplied(self):
@@ -216,7 +228,7 @@ class SubmissionPackageTests(unittest.TestCase):
     def test_domain_matches_the_sdk(self):
         domain = self.package()["eip712"]["domain"]
         self.assertEqual(domain["name"], "Polymarket CTF Exchange")
-        self.assertEqual(domain["version"], "1")
+        self.assertEqual(domain["version"], "2")
         self.assertEqual(domain["chainId"], 137)
 
     def test_verifying_contract_follows_the_market_type(self):
@@ -224,8 +236,8 @@ class SubmissionPackageTests(unittest.TestCase):
         normal = self.package()["eip712"]["domain"]["verifyingContract"]
         neg_market = dataclasses.replace(self.market, neg_risk=True)
         neg = self.build(self.intent, neg_market, self.assessment)["eip712"]["domain"]["verifyingContract"]
-        self.assertEqual(normal, "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E")
-        self.assertEqual(neg, "0xC5d563A36AE78145C45a50134d48A1215220f80a")
+        self.assertEqual(normal, "0xE111180000d2663C0091e4f400237545B87B996B")
+        self.assertEqual(neg, "0xe2222d279d744050d28e00520010520000310F59")
         self.assertNotEqual(normal, neg)
 
     def test_buy_amounts_are_exact_integers_in_base_units(self):
@@ -249,9 +261,10 @@ class SubmissionPackageTests(unittest.TestCase):
 
     def test_caller_owned_fields_are_never_supplied_by_us(self):
         eip = self.package()["eip712"]
-        for field in ("salt", "maker", "signer", "nonce", "signatureType"):
+        for field in ("salt", "maker", "signer", "timestamp", "metadata", "builder", "signature"):
             self.assertIn(field, eip["fields_supplied_by_caller"])
             self.assertNotIn(field, eip["fields_fixed_by_oracle"])
+        self.assertEqual(eip["fields_fixed_by_oracle"]["signatureType"], "3")
 
     def test_service_declares_it_holds_no_credential(self):
         pkg = self.package()
@@ -266,7 +279,7 @@ class SubmissionPackageTests(unittest.TestCase):
     def test_package_carries_settlement_and_pre_trade_context(self):
         pkg = self.package()
         self.assertEqual(pkg["settlement"]["collateral"]["address"],
-                         "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174")
+                         "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB")
         self.assertEqual(pkg["settlement"]["required_allowances"][0]["minimum"], "1.104")
         self.assertEqual(pkg["pre_trade"]["validated_against_tick"], "0.001")
 

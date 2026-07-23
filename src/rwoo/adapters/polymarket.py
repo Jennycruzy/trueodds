@@ -146,36 +146,137 @@ class PreTradeAssessment:
 # Settlement requirements
 #
 # A caller who is going to sign their own order has to fund and approve the
-# right things first, and "USDC on Polygon" is not a sufficient answer: two
-# distinct tokens on Polygon both report symbol "USDC" with 6 decimals.
-# Polymarket settles in the *bridged* one. Funding native USDC leaves the agent
-# holding a balance it cannot trade with.
+# right things first. Current deposit-wallet / CTF Exchange V2 execution uses
+# pUSD collateral. Agents that arrive with USDC.e can wrap through
+# CollateralOnramp.wrap(asset, to, amount), with ``to`` set to their deposit
+# wallet. Agents that arrive with native USDC/USDT should route funds into the
+# caller's own Polymarket bridge address, which credits pUSD to that same
+# caller wallet. None of these routes sends funds through TrueOdds.
 #
 # So the contract address is the authority and the symbol is a human label.
-# Addresses verified against py-clob-client 0.34.6 ``get_contract_config`` and
-# cross-checked on-chain (name/symbol/decimals) 2026-07-22.
+# Addresses verified against Polymarket deposit-wallet/pUSD docs and
+# py-clob-client-v2 1.1.0 ``get_contract_config`` after the G0 live pass.
 POLYGON_CHAIN_ID = 137
 
 COLLATERAL = {
-    "address": "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174",
-    "symbol": "USDC",
-    "name": "USD Coin (PoS)",
+    "address": "0xC011a7E12a19f7B1f670d46F03B03f3342E82DFB",
+    "symbol": "pUSD",
+    "name": "Polymarket USD collateral",
     "decimals": 6,
 }
 
-# Same symbol, same decimals, same chain, different token. Named explicitly so
-# the warning we emit can point at the exact thing not to fund.
-NATIVE_USDC_NOT_COLLATERAL = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+USDCE_ONRAMP_ASSET = "0x2791Bca1f2de4661ED88A30C99A7a9449Aa84174"
+COLLATERAL_ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
+NATIVE_USDC_POLYGON = "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359"
+POLYGON_USDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
+NATIVE_USDC_NOT_COLLATERAL = NATIVE_USDC_POLYGON
+POLYMARKET_BRIDGE_BASE_URL = "https://bridge.polymarket.com"
+XLAYER_CHAIN_ID = 196
 
 # The allowance spender depends on the market: negative-risk markets settle
-# through a different exchange contract. Emitting one static address would tell
-# a subset of callers to approve the wrong contract.
+# through a different V2 exchange contract. Polymarket's relayer requires
+# MaxUint256 approval from the deposit wallet to the selected exchange.
 EXCHANGE_BY_MARKET_TYPE = {
-    False: {"address": "0x4bFb41d5B3570DeFd03C39a9A4D8dE6Bd8B8982E", "role": "exchange"},
-    True: {"address": "0xC5d563A36AE78145C45a50134d48A1215220f80a", "role": "neg_risk_exchange"},
+    False: {"address": "0xE111180000d2663C0091e4f400237545B87B996B", "role": "exchange_v2"},
+    True: {"address": "0xe2222d279d744050d28e00520010520000310F59", "role": "neg_risk_exchange_v2"},
 }
 
 SIGNATURE_TYPES = {0: "EOA", 1: "POLY_PROXY", 2: "GNOSIS_SAFE", 3: "POLY_1271"}
+
+
+def funding_routes() -> list[dict[str, Any]]:
+    """Machine-readable caller-side funding routes into pUSD.
+
+    These are instructions for the caller agent/helper package. They are not ASP
+    custody instructions: the destination wallet is always the caller's
+    Polymarket deposit wallet, and any source-chain transaction is signed by the
+    caller locally.
+    """
+    return [
+        {
+            "id": "polygon-pusd-direct",
+            "source": {
+                "chain": f"eip155:{POLYGON_CHAIN_ID}",
+                **COLLATERAL,
+            },
+            "destination": "caller_poly_1271_deposit_wallet",
+            "method": "erc20_transfer_if_balance_is_on_owner_eoa",
+            "autonomous_helper": "--setup",
+        },
+        {
+            "id": "polygon-usdce-onramp",
+            "source": {
+                "chain": f"eip155:{POLYGON_CHAIN_ID}",
+                "address": USDCE_ONRAMP_ASSET,
+                "symbol": "USDC.e",
+                "name": "USD Coin (PoS)",
+                "decimals": 6,
+            },
+            "destination": "caller_poly_1271_deposit_wallet",
+            "method": "CollateralOnramp.wrap(address asset,address to,uint256 amount)",
+            "contract": COLLATERAL_ONRAMP,
+            "autonomous_helper": "--setup",
+        },
+        {
+            "id": "polygon-usdc-bridge",
+            "source": {
+                "chain": f"eip155:{POLYGON_CHAIN_ID}",
+                "address": NATIVE_USDC_POLYGON,
+                "symbol": "USDC",
+                "name": "USD Coin",
+                "decimals": 6,
+            },
+            "destination": "caller_poly_1271_deposit_wallet",
+            "method": "polymarket_bridge_deposit",
+            "bridge": {
+                "base_url": POLYMARKET_BRIDGE_BASE_URL,
+                "create_deposit": "POST /deposit",
+                "quote": "POST /quote",
+                "status": "GET /status/{evm_deposit_address}",
+                "receive_address_type": "evm",
+            },
+            "autonomous_helper": "--setup",
+        },
+        {
+            "id": "polygon-usdt-bridge",
+            "source": {
+                "chain": f"eip155:{POLYGON_CHAIN_ID}",
+                "address": POLYGON_USDT,
+                "symbol": "USDT",
+                "name": "Tether USD",
+                "decimals": 6,
+            },
+            "destination": "caller_poly_1271_deposit_wallet",
+            "method": "polymarket_bridge_deposit",
+            "bridge": {
+                "base_url": POLYMARKET_BRIDGE_BASE_URL,
+                "create_deposit": "POST /deposit",
+                "quote": "POST /quote",
+                "status": "GET /status/{evm_deposit_address}",
+                "receive_address_type": "evm",
+            },
+            "autonomous_helper": "--setup",
+        },
+        {
+            "id": "xlayer-usdt-okx-to-polymarket-bridge",
+            "source": {
+                "chain": f"eip155:{XLAYER_CHAIN_ID}",
+                "chain_alias": "xlayer",
+                "symbol": "USDT",
+                "decimals": 6,
+                "address_resolution": "onchainos token map: usdt on xlayer",
+            },
+            "destination": "caller_poly_1271_deposit_wallet",
+            "method": "okx_cross_chain_to_polymarket_evm_deposit_address",
+            "route": [
+                "POST https://bridge.polymarket.com/deposit with the caller deposit wallet",
+                "Use returned address.evm as OKX --receive-address",
+                "onchainos cross-chain execute --from usdt --to usdt --from-chain xlayer --to-chain polygon --receive-address <polymarket_evm_deposit_address>",
+                "Polymarket bridge converts the Polygon USDT arrival into pUSD for the caller deposit wallet",
+            ],
+            "autonomous_helper": "--funding-plan --source-asset xlayer-usdt",
+        },
+    ]
 
 
 def settlement_requirements(market: MarketSnapshot, *, notional: Decimal | None = None) -> dict[str, Any]:
@@ -201,14 +302,25 @@ def settlement_requirements(market: MarketSnapshot, *, notional: Decimal | None 
             **COLLATERAL,
             "caip19": f"eip155:{POLYGON_CHAIN_ID}/erc20:{COLLATERAL['address']}",
             "warning": (
-                "Bridged USDC.e. This is NOT native USDC "
-                f"({NATIVE_USDC_NOT_COLLATERAL}), which shares the symbol "
-                "'USDC' and 6 decimals on this chain but cannot be traded here."
+                "Current Polymarket deposit-wallet execution uses pUSD. If the "
+                "caller holds USDC.e, wrap through CollateralOnramp directly to "
+                "the caller's deposit wallet; never send funds to TrueOdds."
             ),
         },
+        "collateral_onramp": {
+            "contract": COLLATERAL_ONRAMP,
+            "method": "wrap(address asset,address to,uint256 amount)",
+            "input_asset": {
+                "address": USDCE_ONRAMP_ASSET,
+                "symbol": "USDC.e",
+                "decimals": 6,
+            },
+            "native_usdc_not_input": NATIVE_USDC_POLYGON,
+        },
+        "funding_routes": funding_routes(),
         "gas_token": {
             "symbol": "POL",
-            "note": "native Polygon gas; needed for approvals only, not per order",
+            "note": "native Polygon gas; needed by caller-side setup transactions; deposit-wallet approvals can be relayed",
         },
         "required_allowances": [allowance],
         "neg_risk_market": bool(market.neg_risk),
@@ -229,11 +341,11 @@ def settlement_requirements(market: MarketSnapshot, *, notional: Decimal | None 
 # and post -- domain, contract, exact integer amounts, endpoint. Returning an
 # internal intent record is not enough: the caller cannot trade from it.
 #
-# Domain verified against py_order_utils (bundled with py-clob-client 0.34.6):
-# name="Polymarket CTF Exchange", version="1", chainId, verifyingContract=the
-# exchange for this market type.
+# Domain verified against py-clob-client-v2 1.1.0:
+# name="Polymarket CTF Exchange", version="2", chainId, verifyingContract=the
+# CTF Exchange V2 contract for this market type.
 EIP712_DOMAIN_NAME = "Polymarket CTF Exchange"
-EIP712_DOMAIN_VERSION = "1"
+EIP712_DOMAIN_VERSION = "2"
 
 # Venue-native side encoding for the signed struct: 0 = BUY, 1 = SELL. Our
 # intents speak YES/NO (which outcome token) -- a different axis entirely.
@@ -308,13 +420,12 @@ def submission_package(intent: dict[str, Any], market: MarketSnapshot,
                 "makerAmount": str(maker_amount),
                 "takerAmount": str(taker_amount),
                 "side": VENUE_SIDE_BUY if venue_side == "BUY" else VENUE_SIDE_SELL,
-                "feeRateBps": str(fee_rate_bps),
-                "taker": "0x0000000000000000000000000000000000000000",
                 "expiration": "0",
+                "signatureType": "3",
             },
             # Filled in locally by the caller's wallet; never supplied by us.
             "fields_supplied_by_caller": [
-                "salt", "maker", "signer", "nonce", "signatureType",
+                "salt", "maker", "signer", "timestamp", "metadata", "builder", "signature",
             ],
         },
         "submission": {
@@ -345,7 +456,7 @@ def submission_package(intent: dict[str, Any], market: MarketSnapshot,
         },
         "human_summary": (
             f"{venue_side} {canonical(size)} {intent.get('side', '?')} contracts "
-            f"at {canonical(price)} for {canonical(cost)} USDC.e collateral"
+            f"at {canonical(price)} for {canonical(cost)} pUSD collateral"
         ),
     }
 

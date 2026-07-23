@@ -43,6 +43,9 @@ ERROR_CODES: dict[str, int] = {
     "RISK_LIMIT_EXCEEDED": 422,
     "APPROVAL_REQUIRED": 403,
     "INVALID_VENUE_RESPONSE": 502,
+    "SIGNED_ORDER_MISMATCH": 422,
+    "SIGNED_ORDER_REPLAY": 409,
+    "VENUE_RELAY_FAILED": 502,
 }
 
 # Codes that a check-market/cross-venue call surfaces as a *refused* decision

@@ -123,6 +123,12 @@ class ExecutionStore:
                 );
                 CREATE INDEX IF NOT EXISTS execution_events_intent
                     ON execution_events(intent_id, sequence);
+                CREATE TABLE IF NOT EXISTS signed_order_submissions (
+                    body_hash TEXT PRIMARY KEY,
+                    intent_id TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL,
+                    FOREIGN KEY(intent_id) REFERENCES execution_intents(intent_id)
+                );
             """)
 
     @staticmethod
@@ -189,6 +195,33 @@ class ExecutionStore:
                 (intent_id, current, target, json.dumps(detail or {}, sort_keys=True), now),
             )
         return self.get(intent_id)
+
+    def reserve_signed_submission(self, intent_id: str, body_hash: str) -> None:
+        """Burn a signed order body for one intent before relay.
+
+        This protects both axes: the same signed bytes cannot be replayed
+        against another intent, and one intent cannot be submitted twice with
+        two different signed bodies.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock, self._connect() as db:
+            db.execute("BEGIN IMMEDIATE")
+            if not db.execute("SELECT 1 FROM execution_intents WHERE intent_id=?", (intent_id,)).fetchone():
+                raise ExecutionError("EXECUTION_NOT_FOUND", "execution intent was not found")
+            try:
+                db.execute(
+                    "INSERT INTO signed_order_submissions(body_hash,intent_id,created_at) VALUES(?,?,?)",
+                    (body_hash, intent_id, now),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ExecutionError("SIGNED_ORDER_REPLAY", "signed order payload was already used") from exc
+
+    def signed_submission_exists(self, body_hash: str) -> bool:
+        with self._connect() as db:
+            return db.execute(
+                "SELECT 1 FROM signed_order_submissions WHERE body_hash=?",
+                (body_hash,),
+            ).fetchone() is not None
 
 
 class ExecutionCoordinator:
@@ -265,6 +298,45 @@ class ExecutionCoordinator:
             return self.store.transition(intent_id, {"SUBMITTING"}, "UNKNOWN",
                                          detail={"reason": type(exc).__name__},
                                          updates={"last_error": "venue outcome unknown; reconciliation required"})
+        return self._apply_result(intent_id, {"SUBMITTING"}, result)
+
+    def submit_signed(self, intent_id: str, body_hash: str, relay) -> dict[str, Any]:
+        """Relay a caller-signed order without server-side signing authority."""
+        intent = self.store.get(intent_id)
+        if not intent:
+            raise ExecutionError("EXECUTION_NOT_FOUND", "execution intent was not found")
+        if intent["state"] != "PREPARED":
+            if self.store.signed_submission_exists(body_hash):
+                raise ExecutionError("SIGNED_ORDER_REPLAY", "signed order payload was already used")
+            raise ExecutionError("INVALID_EXECUTION_STATE", f"cannot submit signed order from {intent['state']}")
+        # Validate before burning the signature so malformed payloads can be
+        # corrected by the caller without consuming the one-shot replay slot.
+        self._pre_submit_validate(intent)
+        self.store.reserve_signed_submission(intent_id, body_hash)
+        intent = self.store.transition(
+            intent_id,
+            {"PREPARED"},
+            "SUBMITTING",
+            detail={"submission": "caller_signed", "body_hash": body_hash},
+        )
+        try:
+            result = relay(intent)
+        except ExecutionError as exc:
+            return self.store.transition(
+                intent_id,
+                {"SUBMITTING"},
+                "REJECTED",
+                detail={"code": exc.code, "reason": "signed_submission_refusal"},
+                updates={"last_error": str(exc)},
+            )
+        except Exception as exc:
+            return self.store.transition(
+                intent_id,
+                {"SUBMITTING"},
+                "UNKNOWN",
+                detail={"reason": type(exc).__name__, "body_hash": body_hash},
+                updates={"last_error": "venue outcome unknown; reconciliation required"},
+            )
         return self._apply_result(intent_id, {"SUBMITTING"}, result)
 
     def _pre_submit_validate(self, intent: dict[str, Any]) -> None:

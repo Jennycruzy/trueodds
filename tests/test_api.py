@@ -9,6 +9,7 @@ discipline the existing parser tests follow.
 from __future__ import annotations
 
 import json
+import base64
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -18,6 +19,7 @@ from unittest.mock import patch
 from rwoo.api.app import create_app
 from rwoo.api.config import Settings
 from rwoo.api.errors import OracleError
+from rwoo.execution import VenueResult
 from rwoo.models import CanonicalMarket
 from rwoo.scanner import ScanRecord
 from tests.support import ASGITestClient
@@ -287,8 +289,15 @@ class ExecutionApiTests(unittest.TestCase):
                              headers={"Idempotency-Key": "execution-1"})
         self.assertEqual(first.status_code, 200)
         self.assertEqual(first.json()["intent_id"], second.json()["intent_id"])
+        client_execution = first.json()["client_execution"]
+        self.assertEqual(client_execution["mode"], "caller_side_signed")
+        self.assertIn("/submit-signed", client_execution["submit_signed"]["url"])
+        route_ids = {route["id"] for route in client_execution["funding_routes"]}
+        self.assertIn("polygon-usdc-bridge", route_ids)
+        self.assertIn("xlayer-usdt-okx-to-polymarket-bridge", route_ids)
         inspected = client.get(f"/v1/executions/{first.json()['intent_id']}")
         self.assertEqual(inspected.json()["notional"], "1.05")
+        self.assertEqual(inspected.json()["client_execution"]["target_collateral"]["symbol"], "pUSD")
 
     def test_submit_fails_closed_by_default(self):
         client, _ = client_for(self.tmp)
@@ -302,6 +311,100 @@ class ExecutionApiTests(unittest.TestCase):
         self.assertEqual(response.json()["error"]["code"], "EXECUTION_DISABLED")
         state = client.get(f"/v1/executions/{prepared['intent_id']}").json()
         self.assertEqual(state["state"], "PREPARED")
+
+    def signed_body(self, *, token_id="token-yes", maker_amount="1050000"):
+        payload = {
+            "order": {
+                "salt": 123,
+                "maker": "0x2c8Be0484b331991542F5edD369C5a70d4255cb6",
+                "signer": "0x2c8Be0484b331991542F5edD369C5a70d4255cb6",
+                "tokenId": token_id,
+                "makerAmount": maker_amount,
+                "takerAmount": "2500000",
+                "side": "BUY",
+                "expiration": "0",
+                "signatureType": 3,
+                "timestamp": "1770000000000",
+                "metadata": "0x" + "0" * 64,
+                "builder": "0x" + "0" * 64,
+                "signature": "0xabc123",
+            },
+            "owner": "api-key",
+            "orderType": "GTC",
+            "deferExec": False,
+            "postOnly": False,
+        }
+        raw = json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode()
+        return base64.b64encode(raw).decode(), raw
+
+    def signed_headers(self):
+        return {
+            "POLY_ADDRESS": "0x39Dd06180B445B3215FD093a3bF7A3Bf42dfbe96",
+            "POLY_API_KEY": "key",
+            "POLY_PASSPHRASE": "passphrase",
+            "POLY_SIGNATURE": "sig",
+            "POLY_TIMESTAMP": "1770000000",
+        }
+
+    def prepared_intent(self, client, key="execution-signed"):
+        payload = self.payload()
+        payload["decision_receipt_hash"] = self.receipt(client)
+        return client.post(
+            "/v1/executions/prepare",
+            json=payload,
+            headers={"Idempotency-Key": key},
+        ).json()
+
+    def test_submit_signed_relay_forwards_original_bytes_and_opens(self):
+        client, _ = client_for(self.tmp)
+        prepared = self.prepared_intent(client)
+        body64, raw = self.signed_body()
+        seen = {}
+
+        def fake_relay(payload):
+            seen["raw"] = payload.body_bytes
+            return VenueResult(state="OPEN", venue_order_id="order-1", message="live")
+
+        with patch("rwoo.api.app.relay_signed_order", side_effect=fake_relay):
+            response = client.post(
+                f"/v1/executions/{prepared['intent_id']}/submit-signed",
+                json={"body_base64": body64, "headers": self.signed_headers()},
+            )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["state"], "OPEN")
+        self.assertEqual(response.json()["venue_order_id"], "order-1")
+        self.assertEqual(seen["raw"], raw)
+
+    def test_submit_signed_rejects_order_that_does_not_match_intent(self):
+        client, _ = client_for(self.tmp)
+        prepared = self.prepared_intent(client, key="execution-mismatch")
+        body64, _ = self.signed_body(maker_amount="999999")
+        response = client.post(
+            f"/v1/executions/{prepared['intent_id']}/submit-signed",
+            json={"body_base64": body64, "headers": self.signed_headers()},
+        )
+        self.assertEqual(response.status_code, 422)
+        self.assertEqual(response.json()["error"]["code"], "SIGNED_ORDER_MISMATCH")
+        state = client.get(f"/v1/executions/{prepared['intent_id']}").json()
+        self.assertEqual(state["state"], "PREPARED")
+
+    def test_submit_signed_burns_signed_body_after_one_use(self):
+        client, _ = client_for(self.tmp)
+        prepared = self.prepared_intent(client, key="execution-replay")
+        body64, _ = self.signed_body()
+
+        with patch("rwoo.api.app.relay_signed_order", return_value=VenueResult(state="OPEN", venue_order_id="order-1")):
+            first = client.post(
+                f"/v1/executions/{prepared['intent_id']}/submit-signed",
+                json={"body_base64": body64, "headers": self.signed_headers()},
+            )
+            second = client.post(
+                f"/v1/executions/{prepared['intent_id']}/submit-signed",
+                json={"body_base64": body64, "headers": self.signed_headers()},
+            )
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.json()["error"]["code"], "SIGNED_ORDER_REPLAY")
 
 
 class CrossVenueTests(unittest.TestCase):

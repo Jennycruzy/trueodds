@@ -10,10 +10,10 @@ criterion that is a *verifiable artifact*, not a feeling. Nothing advances on
 
 ---
 
-## G0 RESULT — 2026-07-22: BLOCKED, and not for a technical reason
+## Historical G0 note — 2026-07-22: first run blocked by geofence
 
 The first funded run did not answer the Variant A question. It surfaced a
-larger one that sits above the whole execution plan.
+larger legal/geography issue that still applies to any relay service.
 
     HTTP 403
     {"error": "Trading restricted in your region, please refer to available
@@ -40,10 +40,9 @@ category of risk.
 
 ### What this does and does not tell us
 
-- **Variant A is neither proven nor disproven.** The 403 fires on geography, not
-  authentication. We still do not know whether the relayed HMAC validates.
-  Everything up to transmission worked: preflight green, L2 derived, order
-  signed, body frozen at 637 bytes and forwarded byte-identical.
+- **At that time, Variant A was neither proven nor disproven.** The 403 fired on
+  geography, not authentication. A later 2026-07-23 live run did prove the
+  relayed HMAC/order path with POLY_1271/pUSD/V2.
 - **The relay is the trading party, in the venue's eyes.** That is the finding
   that matters. A design where TrueOdds submits the order makes TrueOdds' own
   jurisdiction the binding constraint — and if it ever relayed for callers in
@@ -68,8 +67,11 @@ additionally keeps TrueOdds out of the geo/regulatory path. It is the same
 posture already chosen for Kalshi ("route, don't execute") — the geoblock
 suggests it may be the correct posture for Polymarket too.
 
-**This is a business decision, not an engineering one, and it blocks Phase 3.**
-It needs the counsel conversation that Phase 4 already lists — now, not later.
+This remains a business/legal decision, not an engineering workaround. However,
+it no longer means G0 is technically unproven: on 2026-07-23 a later live run
+proved byte-identical caller-signed relay with POLY_1271/pUSD/V2, and the live
+test order was cancelled. The next engineering blocker is the OKX Agentic Wallet
+backend, not the raw-key spike.
 
 ---
 
@@ -354,13 +356,23 @@ coverage is done for all three; only execution is Polymarket-first.
 | 2b Pin SDK mapping | nothing | none |
 | 2c Variant A spike | 2b | own throwaway funds only |
 | 3 submit-signed | **G0** | none if Variant A holds |
-| 4 Certification | 3 + legal | first real caller funds |
+| 3b Agentic Wallet backend | 3 + OKX wallet login test | caller-owned funds only |
+| 4 Certification | 3b + legal | first real caller funds |
 | 5 Kalshi/Limitless | 4 earning | Kalshi: credential — revisit |
 
 ## Open items
 
 - [x] Variant chosen: **A** (caller-supplied L2 headers, zero secrets at rest) — 2026-07-22.
-- [ ] G0: Variant A proven against live CLOB, or fallback to B recorded here.
+- [x] G0: Variant A proven against live CLOB with POLY_1271/pUSD/V2, then live order cancelled — 2026-07-23.
+- [x] ASP `submit-signed`: accepts caller-signed opaque body bytes + L2 headers,
+      validates order economics against prepared intent, relays byte-identical,
+      and burns body hash for replay protection — 2026-07-23.
+- [x] Settlement metadata updated from old USDC.e/V1 assumptions to
+      pUSD/V2/POLY_1271, with funding routes for direct pUSD, Polygon USDC.e,
+      Polygon native USDC, Polygon USDT, and X Layer USDT via OKX bridge.
+- [ ] OKX Agentic Wallet signer backend: email/API-key session can fund/bridge,
+      but Polymarket L2 credential creation and POLY_1271 order signing are not
+      yet live-tested without a raw private key.
 - [ ] Limitless order-signing scheme — verified or not.
 - [ ] Counsel opinion on signal + sizing + routing + relay.
 - [ ] Trade-only deposit-wallet contract question — remains open but is
