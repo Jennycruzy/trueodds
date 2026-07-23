@@ -85,6 +85,19 @@ fee; the post-bridge/-swap wrap consumes whatever actually lands (`CREDITED`).
 3. `sign_order` locally; `POST /submit-signed` with the signed bytes + headers.
 4. TrueOdds validates against the prepared intent and relays byte-identical to CLOB.
 
+## Implementation
+
+- `scripts/buyer_funding.py` — `plan_pusd_funding`: pure route selection (tested).
+- `scripts/buyer_client.py` — the executor:
+  - `Signer` interface with `LocalKeySigner` (Option A, wired) and `ProviderSigner`
+    (Option B, stubbed for the buyer's provider).
+  - `ensure_pusd(signer, rpc, required_units, handlers=...)` — reads balances,
+    plans, and runs each step through the signer. The `wrap` leg is built in;
+    `bridge` (MESON) and `swap` (DEX) are injected handlers the buyer supplies,
+    each of which must block until USDC.e is credited on Polygon.
+  - Dependency-injected (signer / rpc / handlers), so orchestration is unit-tested
+    without a live key, RPC, or venue.
+
 ## Server contract (already built)
 
 - `POST /v1/executions/{intent_id}/submit-signed` — accepts `body_base64 + headers`,
