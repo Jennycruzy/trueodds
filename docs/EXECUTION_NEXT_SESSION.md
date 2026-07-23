@@ -81,27 +81,41 @@ trade-only** (refuse `WALLET` batch withdrawals) is UNRESOLVED and the evidence
 withdrawals). This only matters for the *custodial* model; the non-custodial
 ASP path above does not depend on it.
 
-The implementation address needed to settle it is now known — 2026-07-23. It was
-not findable by public search because the deployed wallets are **beacon**
-proxies, not the UUPS implementation the SDK config advertises:
+The contract to read is now known — 2026-07-23:
 
 ```text
-factory              0x00000000000Fb5C9ADea0298D729A0CB3823Cc07
-beacon               0x7a18edfe055488a3128f01f563e5b479d92ffc3a
-LIVE implementation  0xf7f27c29e60fe6325bef8da7f93250353d2e3294   <- read this
-SDK uups config      0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB   <- NOT this
+0xf7f27c29e60fe6325bef8da7f93250353d2e3294
 ```
 
-Resolved by calling `UpgradeableBeacon.implementation()` (`0x5c60da1b`) on the
-factory's beacon; the result holds 20,858 bytes of deployed code. Read
-`isValidSignature` and the `WALLET` batch authorization there. Reading the SDK's
-UUPS address answers the question about the wrong contract.
+Read `isValidSignature` and the `WALLET` batch authorization there. Do **not**
+read `0x58CA52ebe0DadfdF531Cde7062e76746de4Db1eB`, the address
+`get_contract_config(137).deposit_wallet_implementation` advertises: deployed
+wallets are beacon proxies, so that UUPS address answers the question about the
+wrong contract. This is likely why public search never turned up the source.
 
-The same beacon/UUPS split decides the deposit-wallet address. When the UUPS
-address has no code, `_derive_deposit_wallet_for_owner` falls through to
-`derive_beacon_deposit_wallet`, and the two derivations return **different
-addresses for the same owner**. Always derive through the helper, never through
-`derive_uups_deposit_wallet` alone.
+Found by calling `UpgradeableBeacon.implementation()` (`0x5c60da1b`) on the
+factory's beacon `0x7a18edfe055488a3128f01f563e5b479d92ffc3a`; the result holds
+20,858 bytes of deployed code.
+
+This is a research pointer for the custody question only. No code change is
+required — see the derivation note below, which is already handled.
+
+## Deposit-wallet derivation (no fix needed, just don't hand-roll it)
+
+Two call paths, both correct:
+
+- With a private key: `RelayClient.get_expected_deposit_wallet()`
+  (`scripts/g0_spike.py:116`). The SDK resolves beacon-vs-UUPS itself. This is
+  the path the proven G0 run used.
+- With an Agentic Wallet session: `_derive_deposit_wallet_for_owner()`
+  (`scripts/polymarket_agent_helper.py:75`). `RelayClient` cannot be used here
+  because constructing it requires a private key, so this reproduces the same
+  resolution by hand.
+
+Do not call `derive_uups_deposit_wallet` directly. Deployed wallets are beacon
+proxies, so it returns a **different address for the same owner** than either
+path above, and funding it would send collateral to an address that is not the
+deposit wallet.
 
 ## Current blocker: Agentic Wallet backend test
 
@@ -180,7 +194,10 @@ London host, so the answer depends on where the machine is egressing from.
    the wallet's EIP-712 output satisfies the deposit wallet's ERC-1271
    `isValidSignature` and the ERC-7739 wrapping the v2 SDK applies.
 5. Do not mark the backend executable until a tiny live rest-and-cancel order is
-   accepted through it. Then switch
+   accepted through it, and the result is recorded as a sanitized evidence file
+   in `docs/evidence/` matching the shape of
+   `G0_POLYMARKET_LIVE_RELAY_2026-07-23.md` — order ID, status, cancellation
+   confirmation, no key/secret/HMAC/signed body. Then switch
    `client_execution.wallet_backends[].status` for `okx_agentic_wallet` from
    `funding_ready_order_signing_adapter_pending` to `executable`.
 6. Test the remaining funding routes with tiny amounts: Polygon USDC.e -> pUSD
