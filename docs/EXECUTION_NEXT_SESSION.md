@@ -211,13 +211,14 @@ Rotate the VPS root password shared in chat. Do not enable funded execution on
 the production VPS (8 GB, no swap, prior OOM).
 # Urgent resume checkpoint — 2026-07-23
 
-The OKX Agentic Wallet X Layer test is **partial, with funds already sent**.
+The OKX Agentic Wallet X Layer funding route is **confirmed successful**; full
+order-signing certification remains partial.
 Read
 `docs/evidence/G1_OKX_AGENTIC_WALLET_XLAYER_PARTIAL_2026-07-23.md`
 before doing anything.
 
-Do not log in again, re-fund, or repeat the bridge. The source transaction
-succeeded and 2.5 USD₮0 was deducted:
+Do not re-fund or repeat the bridge. The source transaction succeeded, 2.5
+USD₮0 was deducted, and the destination settled:
 
 - approval:
   `0x897d07d3b836b8d9b3eca56e06e6e8d78eb7e78496df583a60f76d09cf94db17`
@@ -227,27 +228,37 @@ succeeded and 2.5 USD₮0 was deducted:
 - source chain: X Layer `196`
 - receiver/deposit wallet:
   `0x577108052c8D862984B724668E2f6035Eb6Fa5c5`
-
-At handoff, Agentic Wallet history reported the source bridge transaction
-`SUCCESS`, but OKX cross-chain status returned `NOT_FOUND` and the Polygon pUSD
-balance was still zero. The remaining X Layer balance is only `1.719665` USD₮0,
-below the route minimum.
+- OKX cross-chain status: `SUCCESS`
+- destination transaction:
+  `0x48189759376aa9597c877aecdded0642a7f525413dc54058c06e2b003af75e20`
+- confirmed deposit-wallet balance: `2.391351 pUSD`
 
 First actions after resume:
 
-1. Check the existing transaction, without resending:
-   `onchainos cross-chain status --tx-hash 0x4008e6a2809071ebf59b6ba238121923a41c411b3ab4c219c46f9906ceb73843 --bridge-id 223 --from-chain 196`
-2. Check Polygon pUSD directly for the deposit wallet.
-3. If delivered, record the destination transaction and credited amount in the
-   G1 evidence file. If `NOT_FOUND` persists, inspect MESON/explorer state and
-   escalate that exact source transaction to OKX/MESON. Do not send another
-   2.5-token transfer.
-4. Verify the exact approval allowance is now zero; revoke only if a nonzero
-   allowance remains.
-5. Continue the signer adapter. ClobAuth EIP-712 signing already works, but L2
-   credential creation and the ERC-1271/ERC-7739 order-signing path remain to be
-   proven.
-6. Only after pUSD credit, order acceptance, and cancellation are proven may
+1. Do not redeploy the deposit wallet. Deployment is confirmed in Polygon
+   transaction
+   `0x055ab76765d34382f143fa098d55e42984c40809576d630ad1232263b00b5947`.
+2. Preserve the zero exchange allowance. Polymarket's relayer rejected a
+   bounded `0.1 pUSD` approval because it requires `MaxUint256`; do not satisfy
+   that requirement with an unlimited approval. Direct bounded simulation is
+   complete: it succeeds through the factory when called by the authorized
+   Polymarket operator, but the buyer receives `OnlyOperator()`. This is an
+   off-chain hosted-relayer policy incompatibility, not a wallet-contract
+   limitation. The autonomous bounded path requires Polymarket to accept
+   bounded approvals or authorize a TrueOdds factory operator.
+3. Re-test POLY_1271 order validation now that the deposit wallet is deployed.
+   Non-interactive EIP-712 signing, signature recovery, L2 credential creation,
+   HMAC authentication, and ERC-7739 digest equivalence are proven. Distinguish
+   an allowance rejection from a signer rejection.
+4. Keep TrueOdds builder credentials on the integration/server side. Buyer L2
+   credentials cannot create builder credentials and must never receive the
+   TrueOdds builder secret.
+5. Add and certify caller-signed SELL intents for take-profit, stop-loss,
+   invalidation, and time exits.
+6. Add persistent position monitoring, fill reconciliation, and restart
+   recovery.
+7. Only after OKX Agentic Wallet order acceptance and cancellation are proven
+   may
    `okx_agentic_wallet` be changed to `executable`.
 
 Implementation correction still required: enforce/publish the 2.5 minimum only

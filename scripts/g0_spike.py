@@ -195,7 +195,6 @@ POLYGON_USDT = "0xc2132D05D31c914a87C6611C10748AEb04B58e8F"
 COLLATERAL_ONRAMP = "0x93070a847efEf7F70739046A929D47a521F5B8ee"
 POLYMARKET_BRIDGE_BASE_URL = "https://bridge.polymarket.com"
 POLYMARKET_BRIDGE_MIN_UNITS = 2_500_000
-MAX_UINT256 = (1 << 256) - 1
 
 USDC_DECIMALS = 6
 
@@ -617,7 +616,11 @@ def setup_deposit_wallet(env: dict[str, str], required_units: int, spender: str)
         call = DepositWalletCall(
             target=token,
             value="0",
-            data=SEL_APPROVE + _word(spender) + _word(MAX_UINT256),
+            # Keep the approval bounded to this order. The current Polymarket
+            # relayer rejects bounded exchange approvals and demands
+            # MaxUint256; fail there instead of granting drain-level authority
+            # over present and future collateral.
+            data=SEL_APPROVE + _word(spender) + _word(required_units),
         )
         response = relayer.execute_deposit_wallet_batch([call], wallet, nonce, deadline)
         ok(f"approval batch submitted: {response.transaction_id}")
