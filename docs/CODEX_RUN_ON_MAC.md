@@ -73,19 +73,30 @@ The sweep proves the withdrawal leg. The remaining approval leg is now sanctione
 grant `MaxUint256` and keep the wallet at ~0 between trades. It is an explicit,
 gated opt-in (`scripts/jit_execution.py`).
 
+**Spender is market-dependent — derive it, do not hardcode.** A neg-risk market
+settles through `neg_risk_exchange_v2`, everything else through `exchange_v2`
+(`0xE111180000d2663C0091e4f400237545B87B996B`). Approving the wrong one leaves the
+order's allowance at 0. Derive it from the order's token:
+
 ```bash
+SPENDER=$(python - <<'PY'
+import sys; sys.path.insert(0, "scripts")
+import polymarket_agent_helper as h
+print(h._spender_for_token({"SPIKE_CHAIN_ID": "137"}, "<ORDER_TOKEN_ID>"))
+PY
+)
+echo "spender: $SPENDER"
+
 # dry run — confirms approval_kind=maxuint256_jit_policy, no broadcast
-python scripts/agentic_polymarket_setup.py \
-  --spender 0xE111180000d2663C0091e4f400237545B87B996B \
-  --max-approval --jit
+python scripts/agentic_polymarket_setup.py --spender "$SPENDER" --max-approval --jit
 
 # live — grants the MaxUint256 allowance from the deposit wallet via the relayer
-python scripts/agentic_polymarket_setup.py \
-  --spender 0xE111180000d2663C0091e4f400237545B87B996B \
-  --max-approval --jit --execute
+python scripts/agentic_polymarket_setup.py --spender "$SPENDER" --max-approval --jit --execute
 ```
 
-`--max-approval` without `--jit` is refused by design. The full autonomous cycle is
+`--max-approval` without `--jit` is refused by design. After the approval confirms,
+re-submit the same order: it should now clear the allowance check and rest — capture
+the order ID, then cancel to complete the rest-and-cancel certification. The full autonomous cycle is
 then `fund exact notional → approve(MaxUint256) once → sign+submit → sweep unspent
 → idle at ~0`; `SPIKE_JIT_MAX_APPROVAL=1` selects tight funding + MaxUint256 in the
 `g0_spike.py` deposit-wallet setup path.
